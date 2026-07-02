@@ -3,7 +3,7 @@ import { utils, writeFile } from 'xlsx'
 import { CheckCircle2, Database, FileSpreadsheet, History, Save, SlidersHorizontal, Trash2, Upload, XCircle } from 'lucide-react'
 import type { ChannelAnomalySettings, DataKind, PriceAdviceSettings, QualityIssue, StoredData } from '../types/data'
 import { autoMap } from '../utils/fieldMapping'
-import { normalizeRows, readFile, validateRows, validateUploadStructure } from '../utils/parser'
+import { normalizeRows, readFile, validDate, validateRows, validateUploadStructure } from '../utils/parser'
 import { downloadJson, importBackup } from '../utils/storage'
 import FieldMapper from './FieldMapper'
 import DataQualityPanel from './DataQualityPanel'
@@ -12,18 +12,29 @@ import { DEFAULT_CHANNEL_ANOMALY_SETTINGS } from '../utils/channelAnomalies'
 import { DEFAULT_PRICE_ADVICE_SETTINGS } from '../utils/priceAdvice'
 import type { SaveProgress } from '../utils/api'
 
-const kinds: Array<[DataKind, string, string]> = [['hotels', '酒店维度表', '系统预置 · 低频维护'], ['lastYear', '去年同期暑期经营表', '系统预置 · 暑期基准'], ['snapshots', '未来7天预订快照表', '同基准日覆盖 · 保留上一版末次'], ['renovations', '改造店明细', '可选维护 · 按WH编码关联']]
+const kinds: Array<[DataKind, string, string]> = [
+  ['hotels', '酒店维度表', '系统预置 · 低频维护'],
+  ['lastYear', '去年同期暑期经营表', '系统预置 · 最终经营基准'],
+  ['sameLeadSnapshots', '同期同提前期预订快照表', '去年周对周 · 开盘预订基准'],
+  ['snapshots', '未来7天预订快照表', '同基准日覆盖 · 保留上一版末次'],
+  ['renovations', '改造店明细', '可选维护 · 按WH编码关联'],
+]
 const warningMessage = (kind: DataKind) => kind === 'hotels'
   ? '存在数据警告，可继续保存；部分门店商圈或房量缺失，将影响商圈对标或门店标签展示。'
   : kind === 'lastYear'
     ? '存在数据警告，可继续保存；部分历史同期记录存在WH缺失、可售房为空或已售大于可售，将保留在异常清单中，不影响同期基准数据上传。'
+    : kind === 'sameLeadSnapshots'
+      ? '存在数据警告，可继续保存；异常日期行将跳过，未匹配门店及可售房缺失记录仅保留提示，不影响同期同提前期基准保存。'
     : '存在数据警告，可继续保存；异常记录已保留在异常清单中。'
 export default function UploadCenter({ data, onData }: { data: StoredData; onData: (d: StoredData, onProgress?: (progress: SaveProgress) => void) => void | Promise<void> }) {
   const [kind, setKind] = useState<DataKind>('snapshots'); const [raw, setRaw] = useState<Record<string, unknown>[]>([]); const [headers, setHeaders] = useState<string[]>([]); const [mapping, setMapping] = useState<Record<string, string>>({}); const [fileName, setFileName] = useState(''); const [issues, setIssues] = useState<QualityIssue[]>([]); const [message, setMessage] = useState('')
   const [saving, setSaving] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null); const backupRef = useRef<HTMLInputElement>(null)
   const selectKind = (k: DataKind) => { setKind(k); setRaw([]); setIssues([]); setMessage('') }
-  const kindCount = (value: DataKind) => value === 'hotels' ? data.hotels.length : value === 'lastYear' ? data.lastYear.length : value === 'snapshots' ? data.batches.length : data.renovations?.length || 0
+  const kindCount = (value: DataKind) => value === 'hotels' ? data.hotels.length
+    : value === 'lastYear' ? data.lastYear.length
+      : value === 'sameLeadSnapshots' ? data.sameLeadSnapshots?.length || 0
+        : value === 'snapshots' ? data.batches.length : data.renovations?.length || 0
   const load = async (file: File) => {
     try { const rows = await readFile(file); const hs = Object.keys(rows[0] || {}); setRaw(rows); setHeaders(hs); setFileName(file.name); setMapping(autoMap(hs, kind, data.mappings[kind])); setMessage('') }
     catch (e) { setMessage(`读取失败：${e instanceof Error ? e.message : '文件格式错误'}`) }
@@ -78,10 +89,18 @@ export default function UploadCenter({ data, onData }: { data: StoredData; onDat
       })
       saveRows = unique
     }
+    if (kind === 'sameLeadSnapshots') {
+      saveRows = (normalized as NonNullable<StoredData['sameLeadSnapshots']>).filter(record => record.whCode && validDate(record.date))
+      if (!saveRows.length) {
+        setMessage('存在阻断性错误：完全没有可保存的有效数据行')
+        return
+      }
+    }
     setIssues([...found])
     const next = { ...data, qualityIssues: found, mappings: { ...data.mappings, [kind]: mapping } }
     if (kind === 'hotels') next.hotels = saveRows as StoredData['hotels']
     if (kind === 'lastYear') next.lastYear = saveRows as StoredData['lastYear']
+    if (kind === 'sameLeadSnapshots') next.sameLeadSnapshots = saveRows as NonNullable<StoredData['sameLeadSnapshots']>
     if (kind === 'renovations') next.renovations = saveRows as NonNullable<StoredData['renovations']>
     if (kind === 'snapshots') {
       const records = normalized as StoredData['batches'][number]['rows']
@@ -90,7 +109,7 @@ export default function UploadCenter({ data, onData }: { data: StoredData; onDat
     }
     try {
       setSaving(true)
-      await onData(next, kind === 'snapshots' ? progress => setMessage(progress.message) : undefined)
+      await onData(next, kind === 'snapshots' || kind === 'sameLeadSnapshots' ? progress => setMessage(progress.message) : undefined)
       const warningSuffix = found.some(issue => issue.level === 'warning') ? `；${warningMessage(kind)}` : ''
       if (kind === 'snapshots') {
         const dates = [...new Set((saveRows as StoredData['batches'][number]['rows']).map(row => row.targetDate).filter(Boolean))].sort()
@@ -105,6 +124,7 @@ export default function UploadCenter({ data, onData }: { data: StoredData; onDat
     const wb = utils.book_new()
     utils.book_append_sheet(wb, utils.json_to_sheet(data.hotels), 'DimHotel')
     utils.book_append_sheet(wb, utils.json_to_sheet(data.lastYear), 'LastYearSummer')
+    utils.book_append_sheet(wb, utils.json_to_sheet(data.sameLeadSnapshots || []), 'SameLeadBookingSnapshot')
     utils.book_append_sheet(wb, utils.json_to_sheet(data.batches.flatMap(b => b.rows)), 'FutureBookingSnapshot')
     utils.book_append_sheet(wb, utils.json_to_sheet(data.renovations || []), 'Renovations')
     writeFile(wb, '华西预警清洗标准数据.xlsx')
@@ -114,6 +134,8 @@ export default function UploadCenter({ data, onData }: { data: StoredData; onDat
       ? ['酒店名称','酒店WH编码','酒店区域','酒店省区','省总姓名','酒店片区','片区总姓名','经营状态','经营类型','管理类型','酒店品牌','省份','城市','城市等级','行政区域','酒店商圈','商圈属性','收益管理商圈','开业日期','财务品牌定位','中国区品牌定位','城市市场属性','店总姓名','物理房量']
       : templateKind === 'lastYear'
         ? ['酒店名称','酒店省区','酒店片区','酒店WH编码','年月日','综合主营业务收入','过夜房收入','总营业收入','已售房间数','可售房数','已售过夜房数','已售钟点房','钟点房收入','会议室收入']
+        : templateKind === 'sameLeadSnapshots'
+          ? ['酒店名称','酒店WH编码','年月日','预订房间总数（已售房）','有房价的预订房间数','预订总价','可售房间数']
         : templateKind === 'snapshots'
           ? ['酒店名称','酒店WH编码','年月日','跑批次数','一级渠道','二级渠道','三级渠道','预订房间总数（已售房）','可售房间数','预订总价','有房价的预订房间数']
           : ['酒店WH编码','改造类型']
@@ -135,7 +157,7 @@ export default function UploadCenter({ data, onData }: { data: StoredData; onDat
   })
   return <main className="upload-page">
     <div className="upload-hero"><div><span className="eyebrow">DATA OPERATIONS CENTER</span><h2>数据上传中心</h2><p>自动识别字段、校验数据质量，并将确认后的数据写入统一服务端。</p></div>
-      <div className="upload-summary"><span><b>{data.hotels.length}</b>门店</span><span><b>{data.lastYear.length}</b>同期记录</span><span><b>{data.batches.length}</b>快照批次</span><span><b>{data.renovations?.length || 0}</b>改造记录</span></div>
+      <div className="upload-summary"><span><b>{data.hotels.length}</b>门店</span><span><b>{data.lastYear.length}</b>同期最终记录</span><span><b>{data.sameLeadSnapshots?.length || 0}</b>同提前期快照</span><span><b>{data.batches.length}</b>当前快照批次</span><span><b>{data.renovations?.length || 0}</b>改造记录</span></div>
     </div>
     <div className="upload-grid"><section className="panel upload-main">
       <div className="template-actions">{kinds.map(([k, label]) => <button key={k} onClick={() => downloadTemplate(k)}>下载{label}模板</button>)}</div>
@@ -150,7 +172,7 @@ export default function UploadCenter({ data, onData }: { data: StoredData; onDat
     <aside className="panel batch-history"><div className="panel-title compact"><div><span className="eyebrow">SNAPSHOT HISTORY</span><h2>快照批次历史</h2></div><History size={19}/></div>
       <div className="batch-list">{[...data.batches].reverse().map(b => <div key={b.id}><span className="batch-time">{b.batchTime}</span><span><b>{data.currentBaseDate || b.snapshotDate}</b><small>当前版本 · {b.fileName} · {b.rows.length}行</small></span><button title="删除批次" onClick={() => onData({ ...data, batches: data.batches.filter(x => x.id !== b.id) })}><Trash2 size={15}/></button></div>)}{data.previousFinalSnapshot && <div><span className="batch-time">末次</span><span><b>{data.previousFinalSnapshot.baseDate}</b><small>上一版保留 · {data.previousFinalSnapshot.rows.length}行</small></span></div>}{!data.batches.length && <div className="empty-mini">尚未上传快照</div>}</div>
       <div className="data-actions"><button onClick={exportClean}>导出标准数据</button><button onClick={() => downloadJson(data)}>导出数据备份</button><button onClick={() => backupRef.current?.click()}>导入备份恢复</button><input hidden ref={backupRef} type="file" accept=".json" onChange={e => e.target.files?.[0] && restore(e.target.files[0])}/>
-      <button className="danger" onClick={() => confirm('确定清空服务端全部经营数据？此操作不可撤销。') && onData({ hotels: [], lastYear: [], batches: [], currentBaseDate: '', previousFinalSnapshot: undefined, mappings: data.mappings, channelMappings: data.channelMappings, settings: data.settings })}><Trash2 size={14}/>清空全部数据</button></div>
+      <button className="danger" onClick={() => confirm('确定清空服务端全部经营数据？此操作不可撤销。') && onData({ hotels: [], lastYear: [], sameLeadSnapshots: [], batches: [], currentBaseDate: '', previousFinalSnapshot: undefined, mappings: data.mappings, channelMappings: data.channelMappings, settings: data.settings })}><Trash2 size={14}/>清空全部数据</button></div>
       <label className="missing-zero-setting"><input type="checkbox" checked={data.settings?.countMissingBookingAsZero !== false} onChange={e => onData({ ...data, settings: { ...data.settings, countMissingBookingAsZero: e.target.checked } })}/><span><b>缺失预订门店计入0预定数</b><small>仅针对维度表中当前在营、但目标日期完全无预订记录的门店</small></span></label>
       <section className="channel-threshold-settings"><div><SlidersHorizontal/><span><b>渠道异常阈值</b><small>保存后立即应用于渠道异常与门店异常</small></span></div>
         <div className="channel-threshold-grid">

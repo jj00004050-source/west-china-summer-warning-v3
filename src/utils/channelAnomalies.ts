@@ -176,6 +176,7 @@ export function analyzeStoreChannelAnomalies(
     if (mix.online < config.onlineDirectLowShare) tags.push('线上直销偏低')
     if (mix.mainShare > config.singleChannelHighShare) tags.push('单一渠道依赖')
     if (mix.offline > config.singleChannelHighShare) tags.push('线下直销异常')
+    if (mix.offline >= .999) tags.push('线下直销100%')
     if (isDirectStore(row) && mix.online < config.directOnlineLowShare) tags.push('直营店直销偏低')
     if (isDirectStore(row) && mix.ota > config.otaHighShare) tags.push('直营店OTA偏高')
     const storeRecords = recordsByStore[row.whCode] || []

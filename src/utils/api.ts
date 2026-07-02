@@ -4,6 +4,7 @@ import type {
   BroadcastScope,
   BroadcastState,
   SnapshotBatch,
+  SnapshotRecord,
   StoredData,
 } from '../types/data'
 import { EMPTY_DATA } from './storage'
@@ -14,6 +15,7 @@ import {
   type RemoteDashboardManifest,
   type RemoteDataEnvelope,
 } from './remoteData'
+import { channelGroup } from './channels'
 
 const configuredBase = String(import.meta.env.VITE_API_BASE || '').replace(/\/$/, '')
 const API_BASE = configuredBase || (import.meta.env.DEV && location.port === '5173' ? 'http://localhost:8787' : '')
@@ -64,7 +66,8 @@ export async function fetchData(): Promise<StoredData> {
       lastRemoteManifest = null
       return empty
     }
-    const hydrated = await hydrateRemoteData(envelope.manifest, loadRemoteChunk)
+    const publicOptimized = !location.pathname.startsWith('/admin')
+    const hydrated = await hydrateRemoteData(envelope.manifest, loadRemoteChunk, publicOptimized)
     lastRemoteData = hydrated
     lastRemoteManifest = envelope.manifest
     return hydrated
@@ -75,19 +78,11 @@ export async function fetchData(): Promise<StoredData> {
   return local
 }
 
-export async function adminSession() {
-  const res = await request('/api/admin/session')
-  return res.ok && !!(await res.json()).authenticated
-}
-
-export async function adminLogin(password: string) {
-  const res = await request('/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) })
-  if (!res.ok) throw new Error(await jsonError(res, '登录失败'))
-}
-
-export async function adminLogout() {
-  const res = await request('/api/admin/logout', { method: 'POST' })
-  if (!res.ok) throw new Error(await jsonError(res, '退出失败'))
+export async function fetchFullData(): Promise<StoredData> {
+  if (!lastRemoteManifest) return fetchData()
+  const hydrated = await hydrateRemoteData(lastRemoteManifest, loadRemoteChunk, false)
+  lastRemoteData = hydrated
+  return hydrated
 }
 
 const MAX_CHUNK_BYTES = 768 * 1024
@@ -203,6 +198,48 @@ async function uploadChunks(items: unknown[], reusableKeys?: string[], tracker?:
 const sameBatchRows = (batch: SnapshotBatch, prior: StoredData | null) =>
   prior?.batches.find(item => item.id === batch.id)?.rows === batch.rows
 
+const addDays = (value: string, days: number) => {
+  const date = new Date(`${value}T00:00:00Z`)
+  return Number.isNaN(date.getTime()) ? '' : new Date(date.getTime() + days * 86400000).toISOString().slice(0, 10)
+}
+
+function compactPublicRows(rows: SnapshotRecord[]) {
+  const groups = rows.reduce<Record<string, SnapshotRecord[]>>((result, row) => {
+    const main = channelGroup(row)
+    const otaDetail = main === '各OTA' && ['携程','美团','飞猪'].includes(row.channelLevel3 || row.channel)
+      ? (row.channelLevel3 || row.channel) : main === '各OTA' ? 'OTA其他' : ''
+    const key = `${row.whCode}|${row.targetDate}|${main}|${otaDetail}`
+    ;(result[key] ||= []).push(row)
+    return result
+  }, {})
+  return Object.values(groups).map(records => {
+    const first = records[0]
+    const main = channelGroup(first)
+    const otaDetail = main === '各OTA' && ['携程','美团','飞猪'].includes(first.channelLevel3 || first.channel)
+      ? (first.channelLevel3 || first.channel) : main === '各OTA' ? 'OTA其他' : ''
+    const bookedRooms = records.reduce((sum, row) => sum + (row.bookedRooms || 0), 0)
+    const pricedRooms = records.reduce((sum, row) => sum + (row.pricedRooms || 0), 0)
+    const bookingRevenue = records.reduce((sum, row) => sum + (row.bookingRevenue || 0), 0)
+    const availableRooms = Math.max(0, ...records.map(row => row.availableRooms || 0))
+    return {
+      ...first,
+      availableRooms,
+      bookedRooms,
+      pricedRooms,
+      bookingRevenue,
+      bookingRate: availableRooms ? bookedRooms / availableRooms : undefined,
+      onHandAdr: pricedRooms ? bookingRevenue / pricedRooms : undefined,
+      theoreticalRp: availableRooms ? bookingRevenue / availableRooms : undefined,
+      channel: otaDetail || main,
+      channelLevel1: main,
+      channelLevel2: main === '各OTA' ? 'OTA' : main,
+      channelLevel3: otaDetail,
+      channelNights: bookedRooms,
+      channelRevenue: bookingRevenue,
+    } satisfies SnapshotRecord
+  })
+}
+
 async function publishVersionedData(data: StoredData, onProgress?: (progress: SaveProgress) => void): Promise<StoredData> {
   const version = createVersionInfo(data, '线上最新版本')
   const priorData = lastRemoteData
@@ -211,12 +248,19 @@ async function publishVersionedData(data: StoredData, onProgress?: (progress: Sa
   const reusableArrays = {
     hotels: priorData?.hotels === data.hotels ? priorManifest?.arrays.hotels : undefined,
     lastYear: priorData?.lastYear === data.lastYear ? priorManifest?.arrays.lastYear : undefined,
+    sameLeadSnapshots: priorData?.sameLeadSnapshots === data.sameLeadSnapshots ? priorManifest?.arrays.sameLeadSnapshots : undefined,
     renovations: priorData?.renovations === data.renovations ? priorManifest?.arrays.renovations : undefined,
     qualityIssues: priorData?.qualityIssues === data.qualityIssues ? priorManifest?.arrays.qualityIssues : undefined,
   }
-  const [hotels, lastYear, renovations, qualityIssues, batches, previousRowKeys] = await Promise.all([
+  const targetDates = new Set(data.batches.flatMap(batch => batch.rows.map(row => row.targetDate)).filter(Boolean))
+  const publicLastYearRows = data.lastYear.filter(row => row.mappedDate ? targetDates.has(row.mappedDate) : targetDates.has(addDays(row.date, 364)))
+  const publicSameLeadRows = (data.sameLeadSnapshots || []).filter(row => targetDates.has(addDays(row.date, 364)))
+  const publicBatchRows = data.batches.map(batch => ({ batch, rows: compactPublicRows(batch.rows) }))
+  const publicPreviousRows = data.previousFinalSnapshot ? compactPublicRows(data.previousFinalSnapshot.rows.filter(row => targetDates.has(row.targetDate))) : []
+  const [hotels, lastYear, sameLeadSnapshots, renovations, qualityIssues, batches, previousRowKeys, publicLastYear, publicSameLeadSnapshots, publicBatches, publicPreviousRowKeys] = await Promise.all([
     uploadChunks(data.hotels, reusableArrays.hotels, tracker),
     uploadChunks(data.lastYear, reusableArrays.lastYear, tracker),
+    uploadChunks(data.sameLeadSnapshots || [], reusableArrays.sameLeadSnapshots, tracker),
     uploadChunks(data.renovations || [], reusableArrays.renovations, tracker),
     uploadChunks(data.qualityIssues || [], reusableArrays.qualityIssues, tracker),
     Promise.all(data.batches.map(async batch => {
@@ -234,6 +278,13 @@ async function publishVersionedData(data: StoredData, onProgress?: (progress: Sa
           tracker,
         )
       : Promise.resolve([]),
+    uploadChunks(publicLastYearRows, undefined, tracker),
+    uploadChunks(publicSameLeadRows, undefined, tracker),
+    Promise.all(publicBatchRows.map(async ({ batch, rows }) => {
+      const { rows: _rows, ...meta } = batch
+      return { ...meta, rowKeys: await uploadChunks(rows, undefined, tracker) } as RemoteBatchManifest
+    })),
+    data.previousFinalSnapshot ? uploadChunks(publicPreviousRows, undefined, tracker) : Promise.resolve([]),
   ])
   const previousFinalSnapshot = data.previousFinalSnapshot
     ? (() => {
@@ -241,12 +292,20 @@ async function publishVersionedData(data: StoredData, onProgress?: (progress: Sa
         return { ...meta, rowKeys: previousRowKeys }
       })()
     : undefined
+  const publicPreviousFinalSnapshot = data.previousFinalSnapshot
+    ? (() => {
+        const { rows: _rows, ...meta } = data.previousFinalSnapshot!
+        return { ...meta, rowKeys: publicPreviousRowKeys }
+      })()
+    : undefined
   const manifest: RemoteDashboardManifest = {
     schemaVersion: 1,
     version,
-    arrays: { hotels, lastYear, renovations, qualityIssues },
+    arrays: { hotels, lastYear, sameLeadSnapshots, renovations, qualityIssues, publicLastYear, publicSameLeadSnapshots },
     batches,
+    publicBatches,
     previousFinalSnapshot,
+    publicPreviousFinalSnapshot,
     state: {
       currentBaseDate: data.currentBaseDate || '',
       mappings: data.mappings,

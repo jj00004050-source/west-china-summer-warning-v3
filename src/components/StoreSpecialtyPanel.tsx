@@ -1,3 +1,5 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Check, ChevronDown } from 'lucide-react'
 import type { ComparisonRow, MetricRow, PriceAdviceSettings, SnapshotRecord } from '../types/data'
 import { aggregate } from '../utils/metrics'
 import { analyzeStore, buildStoreChannelMix, EMPTY_STORE_MIX } from '../utils/storeAnomalies'
@@ -6,6 +8,28 @@ import { fmtMoney, fmtPct, fmtPp } from '../utils/formatter'
 import { buildPriceAdvice } from '../utils/priceAdvice'
 
 const FILTERS: StoreTypeFilter[] = ['全部门店','直营店','新开店','非新开存量店']
+const MISSING_OPENING_DATE = '开业日期缺失'
+
+const numericAge = (value: string) => {
+  const parsed = Number(value.replace('年', ''))
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+const openingAgeSummary = (selected: string[]) => {
+  if (!selected.length) return '全部'
+  if (selected.length === 1) return selected[0]
+  const hasMissing = selected.includes(MISSING_OPENING_DATE)
+  const numbers = selected.map(numericAge).filter((value): value is number => value != null).sort((a, b) => a - b)
+  if (!hasMissing && numbers.length === selected.length && numbers.every((value, index) => index === 0 || value === numbers[index - 1] + 1)) {
+    return `${numbers[0]}-${numbers.at(-1)}年`
+  }
+  if (selected.length <= 4) return [...selected].sort((a, b) => {
+    if (a === MISSING_OPENING_DATE) return -1
+    if (b === MISSING_OPENING_DATE) return 1
+    return (numericAge(a) || 0) - (numericAge(b) || 0)
+  }).join('、')
+  return `已选${selected.length}项`
+}
 
 export default function StoreSpecialtyPanel({ rows, comparisonRows, channelRows, value, renovationFilter, openingAgeOptions, openingAgeFilter, priceSettings, onChange, onRenovationChange, onOpeningAgeChange }: {
   rows: MetricRow[]
@@ -20,6 +44,21 @@ export default function StoreSpecialtyPanel({ rows, comparisonRows, channelRows,
   onRenovationChange: (value: RenovationFilter) => void
   onOpeningAgeChange: (value: string[]) => void
 }) {
+  const [ageOpen, setAgeOpen] = useState(false)
+  const [draftOpeningAges, setDraftOpeningAges] = useState(openingAgeFilter)
+  const ageFilterRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!ageOpen) setDraftOpeningAges(openingAgeFilter)
+  }, [openingAgeFilter, ageOpen])
+  useEffect(() => {
+    if (!ageOpen) return
+    const close = (event: MouseEvent) => {
+      if (!ageFilterRef.current?.contains(event.target as Node)) setAgeOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [ageOpen])
+  const numericOptions = useMemo(() => openingAgeOptions.filter(option => numericAge(option) != null), [openingAgeOptions])
   const selected = rows.filter(row => matchesStoreType(row, value) && matchesRenovationFilter(row, renovationFilter))
   const metric = aggregate(selected)
   const mixByHotel = buildStoreChannelMix(channelRows)
@@ -92,17 +131,44 @@ export default function StoreSpecialtyPanel({ rows, comparisonRows, channelRows,
           ['价格偏高风险', priceLabels.filter(label => label === '价格偏高风险').length, '家'],
         ] : []),
       ]
-  const toggleOpeningAge = (option: string) => onOpeningAgeChange(
-    openingAgeFilter.includes(option) ? openingAgeFilter.filter(value => value !== option) : [...openingAgeFilter, option],
+  const toggleOpeningAge = (option: string) => setDraftOpeningAges(current =>
+    current.includes(option) ? current.filter(value => value !== option) : [...current, option],
   )
+  const selectQuickAge = (range: 'all' | '0-1' | '2-5' | '5+' | '10+' | 'custom') => {
+    if (range === 'custom') return
+    if (range === 'all') return setDraftOpeningAges([])
+    const selected = numericOptions.filter(option => {
+      const year = numericAge(option)
+      if (year == null) return false
+      if (range === '0-1') return year <= 1
+      if (range === '2-5') return year >= 2 && year <= 5
+      if (range === '5+') return year >= 5
+      return year >= 10
+    })
+    setDraftOpeningAges(selected)
+  }
   return <section className="store-specialty-panel">
     <div className="store-specialty-head"><div><b>门店类型专项视角</b><span>类型标签不等于经营异常；仅作用于当前在营门店</span></div>
       <div className="store-type-actions"><div className="store-type-filter">{FILTERS.map(filter => <button className={value === filter ? 'active' : ''} key={filter} onClick={() => onChange(filter)}>{filter}</button>)}</div>
         <label><span>改造店筛选</span><select value={renovationFilter} onChange={event => onRenovationChange(event.target.value)}><option>全部</option><option>改造店</option><option>非改造店</option>{renovationTypes.map(type => <option key={type}>{type}</option>)}</select></label></div>
     </div>
-    <div className="opening-age-filter">
-      <div className="opening-age-head"><span><b>开业年限</b><small>{openingAgeFilter.length ? `已选 ${openingAgeFilter.length} 项` : '默认不筛选，展示全部当前在营门店'}</small></span><div><button onClick={() => onOpeningAgeChange(openingAgeOptions)}>全选</button><button className="clear" onClick={() => onOpeningAgeChange([])}>清空</button></div></div>
-      <div className="opening-age-grid">{openingAgeOptions.map(option => <button className={openingAgeFilter.includes(option) ? 'active' : ''} onClick={() => toggleOpeningAge(option)} key={option}>{option}</button>)}</div>
+    <div className="opening-age-filter" ref={ageFilterRef}>
+      <button className={`opening-age-trigger ${ageOpen ? 'open' : ''}`} onClick={() => setAgeOpen(value => !value)}>
+        <span><small>开业年限</small><b>{openingAgeSummary(openingAgeFilter)}</b></span><ChevronDown/>
+      </button>
+      {ageOpen && <div className="opening-age-popover">
+        <div className="opening-age-quick"><span>快捷选择</span><div>
+          <button onClick={() => selectQuickAge('all')}>全部</button><button onClick={() => selectQuickAge('0-1')}>0-1年</button>
+          <button onClick={() => selectQuickAge('2-5')}>2-5年</button><button onClick={() => selectQuickAge('5+')}>5年以上</button>
+          <button onClick={() => selectQuickAge('10+')}>10年以上</button><button onClick={() => selectQuickAge('custom')}>自定义</button>
+        </div></div>
+        <div className="opening-age-selection"><span>年限多选</span><small>当前：{openingAgeSummary(draftOpeningAges)}</small></div>
+        <div className="opening-age-options">{openingAgeOptions.map(option => <label className={draftOpeningAges.includes(option) ? 'active' : ''} key={option}>
+          <input type="checkbox" checked={draftOpeningAges.includes(option)} onChange={() => toggleOpeningAge(option)}/><i>{draftOpeningAges.includes(option) && <Check/>}</i><span>{option}</span>
+        </label>)}</div>
+        <div className="opening-age-footer"><button className="clear" onClick={() => { setDraftOpeningAges([]); onOpeningAgeChange([]); setAgeOpen(false) }}>清空</button>
+          <button className="confirm" onClick={() => { onOpeningAgeChange(draftOpeningAges); setAgeOpen(false) }}>确定</button></div>
+      </div>}
     </div>
     <div className="store-specialty-cards">{cards.map(([label, number, unit]) => <article key={String(label)}><small>{label}</small><b>{number}<em>{unit}</em></b></article>)}</div>
     {(value !== '全部门店' || renovationFilter !== '全部') && <div className="store-specialty-channel"><span>渠道结构</span><b>各OTA {fmtPct(selectedMix.total ? selectedMix.ota / selectedMix.total : 0)}</b><b>线上直销 {fmtPct(selectedMix.total ? selectedMix.online / selectedMix.total : 0)}</b><b>线下直销 {fmtPct(selectedMix.total ? selectedMix.offline / selectedMix.total : 0)}</b></div>}

@@ -3,6 +3,7 @@ import type { StoredData } from '../types/data'
 export const EMPTY_DATA: StoredData = {
   hotels: [],
   lastYear: [],
+  sameLeadSnapshots: [],
   batches: [],
   renovations: [],
   currentBaseDate: '',

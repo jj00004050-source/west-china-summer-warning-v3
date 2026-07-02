@@ -1,4 +1,4 @@
-export type DataKind = 'hotels' | 'lastYear' | 'snapshots' | 'renovations'
+export type DataKind = 'hotels' | 'lastYear' | 'snapshots' | 'sameLeadSnapshots' | 'renovations'
 export type RiskLevel = 'high' | 'watch' | 'normal' | 'leading'
 
 export interface Hotel {
@@ -63,6 +63,16 @@ export interface SnapshotRecord {
   channelBookingRate?: number
 }
 
+export interface SameLeadSnapshotRecord {
+  name?: string
+  whCode: string
+  date: string
+  bookedRooms: number
+  pricedRooms: number
+  bookingRevenue: number
+  availableRooms: number
+}
+
 export interface SnapshotBatch {
   id: string
   uploadTime: string
@@ -101,6 +111,7 @@ export interface StoredData {
   hotels: Hotel[]
   lastYear: LastYearRecord[]
   batches: SnapshotBatch[]
+  sameLeadSnapshots?: SameLeadSnapshotRecord[]
   renovations?: RenovationRecord[]
   currentBaseDate?: string
   previousFinalSnapshot?: PreviousFinalSnapshot
@@ -108,6 +119,8 @@ export interface StoredData {
   channelMappings: Record<string, string>
   qualityIssues?: QualityIssue[]
   version?: DashboardVersionInfo
+  /** 线上公共看板使用上传阶段预聚合后的轻量数据；管理员及完整渠道视图仍可按需读取原始明细。 */
+  publicOptimized?: boolean
   settings?: {
     countMissingBookingAsZero?: boolean
     channelAnomaly?: ChannelAnomalySettings
@@ -217,6 +230,16 @@ export interface MetricRow {
   previousBookedRooms: number | null
   previousPricedRooms: number | null
   previousBookingRevenue: number | null
+  sameLeadAvailableRooms: number | null
+  sameLeadBookedRooms: number | null
+  sameLeadPricedRooms: number | null
+  sameLeadBookingRevenue: number | null
+  sameLeadBookingRate: number | null
+  sameLeadAdr: number | null
+  sameLeadRp: number | null
+  sameLeadBookingRateGap: number | null
+  sameLeadAdrGap: number | null
+  sameLeadRpGap: number | null
   mainChannel: string
   risk: RiskLevel
   tags: string[]

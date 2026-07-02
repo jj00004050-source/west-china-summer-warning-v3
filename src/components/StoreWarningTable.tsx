@@ -6,6 +6,7 @@ import { fmtMoney, fmtPct, fmtPp } from '../utils/formatter'
 import { aggregate } from '../utils/metrics'
 import { CHANNEL_COLORS } from '../utils/channels'
 import BookingRateBar from './BookingRateBar'
+import MetricTrendLines from './MetricTrendLines'
 import type { DistributionMetric } from '../utils/diagnostics'
 import { buildPriceAdvice, type PriceAdvice, type PriceAdviceLabel } from '../utils/priceAdvice'
 import { storeTypeProfile, type RenovationFilter, type StoreTypeFilter } from '../utils/storeTypes'
@@ -37,13 +38,13 @@ const cardDefinitions = [
 
 const PRICE_ADVICE_OPTIONS: Array<'全部提价建议' | PriceAdviceLabel> = [
   '全部提价建议','强烈建议提价','建议提价','建议小幅提价','阶梯式提价','提前提价机会','保持观察',
-  '渠道补量','渠道预热','不建议提价','流量预警','价格偏高风险','低价接量风险','样本不足','商圈未配置，无法判断',
+  '渠道补量','渠道预热','不建议提价','流量预警','价格偏高风险','高量低价风险','样本不足','商圈未配置，无法判断',
 ]
 const PRICE_OPPORTUNITY_LABELS: PriceAdviceLabel[] = ['强烈建议提价','建议提价','建议小幅提价','阶梯式提价','提前提价机会']
 const priceAdviceTone = (label: PriceAdviceLabel) => label === '强烈建议提价' ? 'strong'
   : PRICE_OPPORTUNITY_LABELS.includes(label) ? 'mild'
     : label === '价格偏高风险' ? 'high'
-      : ['低价接量风险','不建议提价','渠道补量','渠道预热','流量预警'].includes(label) ? 'watch'
+      : ['高量低价风险','不建议提价','渠道补量','渠道预热','流量预警'].includes(label) ? 'watch'
         : label === '商圈未配置，无法判断' ? 'zone' : 'neutral'
 
 function ChannelDonut({ mix }: { mix: StoreChannelMix }) {
@@ -78,6 +79,7 @@ export default function StoreWarningTable({ rows, benchmarkRows = rows, comparis
   const [sort, setSort] = useState<SortKey>('rpGap')
   const [asc, setAsc] = useState(true)
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768 ? 10 : 20)
   useEffect(() => {
     if (!initialDiagnosticSort) return
     const mapped: Partial<Record<DistributionMetric, SortKey>> = { zoneGap: 'zoneGap', bookingRate: 'bookingRate', rpGap: 'rpGap', rp: 'rp', adrGap: 'adr', bookingRateChange: 'bookingRate', rpChange: 'snapshotChange', otaShare: 'otaShare', onlineShare: 'onlineShare' }
@@ -166,8 +168,10 @@ export default function StoreWarningTable({ rows, benchmarkRows = rows, comparis
     const av = value(a), bv = value(b)
     return (typeof av === 'string' ? av.localeCompare(String(bv), 'zh-CN') : av - Number(bv)) * (asc ? 1 : -1)
   }), [enriched, query, anomalyFilter, priceFilter, sort, asc, priority, storeTypeFilter, renovationFilter])
-  const pageRows = filtered.slice((page - 1) * 12, page * 12)
-  const pages = Math.max(1, Math.ceil(filtered.length / 12))
+  const pageRows = filtered.slice((page - 1) * pageSize, page * pageSize)
+  const pages = Math.max(1, Math.ceil(filtered.length / pageSize))
+  useEffect(() => { setPage(1) }, [rows, query, anomalyFilter, priceFilter, storeTypeFilter, renovationFilter, pageSize])
+  useEffect(() => { if (page > pages) setPage(pages) }, [page, pages])
   const doSort = (key: SortKey) => { if (sort === key) setAsc(value => !value); else { setSort(key); setAsc(true) } }
   const chooseFilter = (value: string) => { setAnomalyFilter(value); setPage(1) }
   const exportRows = () => {
@@ -176,6 +180,8 @@ export default function StoreWarningTable({ rows, benchmarkRows = rows, comparis
       品牌: row.brand, 品牌定位: row.positioning, 经营类型: row.operationType, 管理类型: row.managementType, 是否直营: anomaly.direct ? '是' : '否',
       当前预订率: row.bookingRate, 商圈预订率: zoneRate, 较商圈差异: zoneGap, 在手ADR: row.adr, 理论RP: row.rp, 同期RP: row.lastRp, RP缺口: row.rpGap,
       预订率较上一版变化: anomaly.bookingRateChange, ADR较上一版变化: anomaly.adrChange, 理论RP较上一版变化: anomaly.rpChange,
+      同期同提前期预订率: row.sameLeadBookingRate, 同期同提前期在手ADR: row.sameLeadAdr, 同期同提前期理论RP: row.sameLeadRp,
+      同提前期预订率差异: row.sameLeadBookingRateGap, 同提前期ADR差异: row.sameLeadAdrGap, 同提前期理论RP差异: row.sameLeadRpGap,
       经营风险等级: GRADE_LABEL[anomaly.grade], 经营异常标签: anomaly.businessTags.join('、'), 经营异常原因: anomaly.businessReasons.join('；'),
       状态标签: anomaly.statusTags.join('、'), 口径说明: anomaly.statusReasons.join('；'), 数据校验标签: anomaly.dataTags.join('、'), 数据校验原因: anomaly.dataReasons.join('；'),
       门店类型标签: typeProfile.typeTags.join('、'), 是否新开: typeProfile.isNew ? '是' : '否', 开业日期: row.openDate, 开业月龄: typeProfile.openMonths,
@@ -209,14 +215,14 @@ export default function StoreWarningTable({ rows, benchmarkRows = rows, comparis
             {renovationTags.length > 0 && <div className="store-tag-groups renovation-tags">{renovationTags.slice(0, 2).map(tag => <em key={tag}>{tag}</em>)}</div>}
             <div className="store-tag-groups">{anomaly.businessTags.slice(0, 3).map(tag => <em className="business" key={tag}>{tag}</em>)}{anomaly.statusTags.slice(0, 2).map(tag => <em className="status" key={tag}>{tag}</em>)}{anomaly.dataTags.slice(0, 1).map(tag => <em className="data" key={tag}>{tag}</em>)}</div></td>
           <td>{row.province}<small>{row.area}</small>{row.isRenovated && <small className="renovation-type-inline">改造类型：{row.renovationType || '未标记'}</small>}<em className="store-available-inline">可售 {row.availableRooms || (row.tags.includes('缺失预订数据') ? '--' : 0)}</em></td>
-          <td><BookingRateBar value={row.bookingRate}/><div className="zone-rate-compare"><span>商圈 {fmtPct(zoneRate)}</span><b className={(zoneGap || 0) < 0 ? 'negative' : 'positive'}>{fmtPp(zoneGap)}</b></div></td>
-          <td>{fmtMoney(row.adr)}<small className={(anomaly.adrChange || 0) < 0 ? 'negative' : 'positive'}>环比 {anomaly.adrChange == null ? '--' : `${anomaly.adrChange > 0 ? '+' : ''}${fmtMoney(anomaly.adrChange)}元`}</small></td><td>{fmtMoney(row.rp)}</td><td>{fmtMoney(row.lastRp)}</td>
+          <td><BookingRateBar value={row.bookingRate}/><MetricTrendLines kind="rate" change={anomaly.bookingRateChange} sameLeadGap={row.sameLeadBookingRateGap}/><div className="zone-rate-compare"><span>商圈 {fmtPct(zoneRate)}</span><b className={(zoneGap || 0) < 0 ? 'negative' : 'positive'}>{fmtPp(zoneGap)}</b></div></td>
+          <td>{fmtMoney(row.adr)}<MetricTrendLines kind="money" change={anomaly.adrChange} sameLeadGap={row.sameLeadAdrGap}/></td><td>{fmtMoney(row.rp)}<MetricTrendLines kind="money" change={anomaly.rpChange} sameLeadGap={row.sameLeadRpGap}/></td><td>{fmtMoney(row.lastRp)}</td>
           <td className={(row.rpGap || 0) < 0 ? 'negative' : 'positive'}>{fmtMoney(row.rpGap)}</td>
           <td className={(anomaly.rpChange || 0) < 0 ? 'negative' : 'positive'}>{anomaly.rpChange == null ? '--' : `${anomaly.rpChange >= 0 ? '↑' : '↓'}${fmtMoney(Math.abs(anomaly.rpChange))}`}</td>
           <td><div className={`price-advice-cell advice-${priceAdviceTone(priceAdvice.label)}`} title={priceAdvice.reason}><b>{priceAdvice.label}</b><small>{priceAdvice.reason}</small></div></td>
           <td><ChannelDonut mix={mix}/></td>
         </tr>)}</tbody></table>{!pageRows.length && <div className="empty-mini">当前筛选范围暂无门店数据</div>}</div>
-      <div className="pagination"><span>第 {page}/{pages} 页 · 共 {filtered.length} 家</span><button disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</button><button disabled={page >= pages} onClick={() => setPage(page + 1)}>下一页</button></div>
+      <div className="pagination"><label>每页显示 <select value={pageSize} onChange={event => setPageSize(Number(event.target.value))}><option value={10}>10</option><option value={20}>20</option><option value={50}>50</option></select></label><span>第 {page}/{pages} 页 · 共 {filtered.length} 家</span><button disabled={page <= 1} onClick={() => setPage(page - 1)}>上一页</button><button disabled={page >= pages} onClick={() => setPage(page + 1)}>下一页</button></div>
     </section>
   </>
 }

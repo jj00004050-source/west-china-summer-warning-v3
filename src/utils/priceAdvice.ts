@@ -13,7 +13,7 @@ export type PriceAdviceLabel =
   | '不建议提价'
   | '流量预警'
   | '价格偏高风险'
-  | '低价接量风险'
+  | '高量低价风险'
   | '样本不足'
   | '商圈未配置，无法判断'
 
@@ -176,7 +176,7 @@ export function buildPriceAdvice(row: MetricRow, context: PriceAdviceContext, se
   const lowVsZone = zoneAdrGap != null && zoneAdrGap < 0
   const lowVsLast = lastAdrGap != null && lastAdrGap < 0
   if ((rateRising && adrFalling) || lowVsZone || lowVsLast) {
-    return result('低价接量风险', `OTB${rateRising ? '提升' : '有基础'}但ADR偏低，关注低价换量`)
+    return result('高量低价风险', `OTB${rateRising ? '提升' : '有基础'}但ADR偏低，关注收益质量`)
   }
 
   const adrSpace = !highVsZone && !highVsLast

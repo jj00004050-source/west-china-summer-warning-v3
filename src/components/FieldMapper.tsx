@@ -4,6 +4,7 @@ import { FIELD_LABELS, SCHEMAS } from '../utils/fieldMapping'
 const REQUIRED_FIELDS: Record<DataKind, string[]> = {
   hotels: ['whCode', 'name'],
   lastYear: ['date', 'availableRooms', 'soldRooms', 'revenue'],
+  sameLeadSnapshots: ['whCode', 'date', 'bookedRooms', 'bookingRevenue', 'availableRooms'],
   snapshots: ['whCode', 'targetDate', 'batchTime', 'availableRooms', 'bookedRooms', 'bookingRevenue'],
   renovations: ['whCode', 'renovationType'],
 }

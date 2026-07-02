@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import ReactECharts from 'echarts-for-react'
-import { AlertTriangle, ChevronLeft, ChevronRight, Store } from 'lucide-react'
+import { utils, writeFile } from 'xlsx'
+import { AlertTriangle, ChevronLeft, ChevronRight, Download, Store } from 'lucide-react'
 import type { ChannelAnomalySettings, MetricRow, SnapshotRecord } from '../types/data'
 import {
   aggregateChannelAnomalies,
@@ -12,6 +13,7 @@ import {
 } from '../utils/channelAnomalies'
 import { channelColor } from '../utils/channels'
 import { fmtMoney, fmtPct, fmtPp } from '../utils/formatter'
+import { storeTypeProfile } from '../utils/storeTypes'
 
 const LEVEL_LABEL: Record<ChannelLevel, string> = { channelLevel1: '一级渠道', channelLevel2: '二级渠道', channelLevel3: '三级渠道' }
 const RISK_LABEL: Record<ChannelRisk, string> = { high: '高风险', watch: '关注', positive: '改善', normal: '正常', sample: '样本量低' }
@@ -113,27 +115,86 @@ export function StoreChannelAnomalyTab({ rows, previousRows, stores, settings, o
   onStore: (store: MetricRow) => void
   initialFilter?: string
 }) {
+  type StoreSortKey = 'name' | 'province' | 'area' | 'city' | 'revenueZone' | 'bookingRate' | 'adr' | 'maxShare' | 'ota' | 'online' | 'offline' | 'tags' | 'risk' | 'bookedRooms' | 'bookingRevenue' | 'availableRooms' | 'rp' | 'bookingRateChange' | 'adrChange' | 'rpChange'
   const [page, setPage] = useState(1)
   const [filter, setFilter] = useState(initialFilter)
+  const [pageSize, setPageSize] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768 ? 10 : 20)
+  const [sort, setSort] = useState<{ key: StoreSortKey; direction: 'desc' | 'asc' } | null>(null)
   const items = useMemo(() => analyzeStoreChannelAnomalies(stores, rows, previousRows, settings)
     .sort((a, b) => RISK_ORDER[a.risk] - RISK_ORDER[b.risk] || b.maxShare - a.maxShare), [stores, rows, previousRows, settings])
   const options = ['全部','OTA占比过高','线上直销偏低','单一渠道依赖','渠道ADR偏低','直营店直销偏低','直营店OTA偏高']
-  const filtered = filter === '全部' ? items : items.filter(item => item.tags.includes(filter))
-  const pageSize = 20
+  const bookingRateChange = (row: MetricRow) => row.bookingRate != null && row.previousAvailableRooms
+    ? row.bookingRate - (row.previousBookedRooms || 0) / row.previousAvailableRooms : null
+  const adrChange = (row: MetricRow) => row.adr != null && row.previousPricedRooms
+    ? row.adr - (row.previousBookingRevenue || 0) / row.previousPricedRooms : null
+  const rpChange = (row: MetricRow) => row.rp != null && row.previousAvailableRooms
+    ? row.rp - (row.previousBookingRevenue || 0) / row.previousAvailableRooms : null
+  const sortValue = (item: ReturnType<typeof analyzeStoreChannelAnomalies>[number], key: StoreSortKey): string | number => {
+    if (key === 'ota' || key === 'online' || key === 'offline') return item.mix[key]
+    if (key === 'tags') return item.tags.join('、')
+    if (key === 'risk') return RISK_ORDER[item.risk]
+    if (key === 'bookingRateChange') return bookingRateChange(item.row) ?? Number.NEGATIVE_INFINITY
+    if (key === 'adrChange') return adrChange(item.row) ?? Number.NEGATIVE_INFINITY
+    if (key === 'rpChange') return rpChange(item.row) ?? Number.NEGATIVE_INFINITY
+    if (key === 'maxShare') return item.maxShare
+    const value = item.row[key as keyof MetricRow]
+    return typeof value === 'number' ? value : String(value ?? '')
+  }
+  const filtered = useMemo(() => {
+    const source = filter === '全部' ? items : items.filter(item => item.tags.includes(filter))
+    if (!sort) return source
+    return [...source].sort((a, b) => {
+      const av = sortValue(a, sort.key), bv = sortValue(b, sort.key)
+      const compared = typeof av === 'string' ? av.localeCompare(String(bv), 'zh-CN') : av - Number(bv)
+      return compared * (sort.direction === 'asc' ? 1 : -1)
+    })
+  }, [items, filter, sort])
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize))
-  const pageRows = filtered.slice((Math.min(page, pages) - 1) * pageSize, Math.min(page, pages) * pageSize)
+  const currentPage = Math.min(page, pages)
+  const pageRows = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+  useEffect(() => { setPage(1) }, [filter, pageSize, stores, rows, previousRows])
+  useEffect(() => { if (page > pages) setPage(pages) }, [page, pages])
+  const doSort = (key: StoreSortKey) => setSort(current => {
+    if (!current || current.key !== key) return { key, direction: 'desc' }
+    if (current.direction === 'desc') return { key, direction: 'asc' }
+    return null
+  })
+  const th = (key: StoreSortKey, label: string) => <th onClick={() => doSort(key)} className={sort?.key === key ? 'sorted' : ''}>{label}{sort?.key === key ? sort.direction === 'desc' ? ' ↓' : ' ↑' : ''}</th>
+  const exportRows = () => {
+    const exported = filtered.map(item => {
+      const profile = storeTypeProfile(item.row)
+      return {
+        酒店WH编码: item.row.whCode, 门店名称: item.row.name, 省区: item.row.province, 片区: item.row.area, 城市: item.row.city,
+        收益管理商圈: item.row.revenueZone, 预订率: item.row.bookingRate, 在手ADR: item.row.adr, 理论RP: item.row.rp,
+        最大渠道: item.maxChannel, 最大渠道占比: item.maxShare, 各OTA占比: item.mix.ota, 线上直销占比: item.mix.online,
+        线下直销占比: item.mix.offline, 携程占比: item.mix.ctrip, 美团占比: item.mix.meituan, 飞猪占比: item.mix.fliggy,
+        渠道异常标签: item.tags.join('、'), 渠道风险等级: RISK_LABEL[item.risk], 预订房间数: item.row.bookedRooms,
+        预订总价: item.row.bookingRevenue, 可售房: item.row.availableRooms, 预订率环比: bookingRateChange(item.row),
+        在手ADR环比: adrChange(item.row), 理论RP环比: rpChange(item.row), 同期同提前期预订率差异: item.row.sameLeadBookingRateGap,
+        同期同提前期ADR差异: item.row.sameLeadAdrGap, 同期同提前期理论RP差异: item.row.sameLeadRpGap,
+        直营或加盟: profile.direct ? '直营' : '非直营', 新开店标识: profile.isNew ? '是' : '否',
+        改造店标识: profile.isRenovated ? '是' : '否', 开业年限: profile.openMonths == null ? '开业日期缺失' : `${Math.floor(profile.openMonths / 12)}年`,
+        数据日期: item.row.targetDate, 跑批次数: rows[0]?.batchTime || '',
+      }
+    })
+    const wb = utils.book_new()
+    utils.book_append_sheet(wb, utils.json_to_sheet(exported), '渠道异常明细')
+    const target = stores[0]?.targetDate?.replaceAll('-', '') || '当前日期'
+    writeFile(wb, `渠道异常明细_${target}_第${rows[0]?.batchTime || '--'}次跑批.xlsx`)
+  }
   return <section className="light-card channel-store-anomaly">
-    <div className="light-card-head"><div><h2>门店渠道异常TOP</h2><p>只展示有预订来源的门店；0预定门店不误判为渠道异常</p></div><div className="channel-store-tools"><select value={filter} onChange={event => { setFilter(event.target.value); setPage(1) }}>{options.map(option => <option key={option}>{option}</option>)}</select><span><Store/> {filtered.length} 家</span></div></div>
-    <div className="province-table"><table><thead><tr><th>门店</th><th>省区 / 片区</th><th>城市 / 收益管理商圈</th><th>预订率</th><th>在手ADR</th><th>最大渠道</th><th>各OTA</th><th>线上直销</th><th>线下直销</th><th>携程</th><th>美团</th><th>飞猪</th><th>渠道ADR异常</th><th>异常标签</th><th>风险</th></tr></thead>
+    <div className="light-card-head"><div><h2>门店渠道异常TOP</h2><p>只展示有预订来源的门店；0预定门店不误判为渠道异常</p></div><div className="channel-store-tools"><select value={filter} onChange={event => { setFilter(event.target.value); setPage(1) }}>{options.map(option => <option key={option}>{option}</option>)}</select><button className="table-export" onClick={exportRows}><Download/>导出渠道异常明细</button><span><Store/> {filtered.length} 家</span></div></div>
+    <div className="province-table channel-store-table"><table><thead><tr>{th('name','门店')}{th('province','省区')}{th('area','片区')}{th('city','城市')}{th('revenueZone','收益管理商圈')}{th('bookingRate','预订率')}{th('adr','在手ADR')}{th('maxShare','最大渠道')}{th('ota','各OTA')}{th('online','线上直销')}{th('offline','线下直销')}<th>携程</th><th>美团</th><th>飞猪</th><th>渠道ADR异常</th>{th('tags','异常标签')}{th('risk','风险')}{th('bookedRooms','预订房间数')}{th('bookingRevenue','预订总价')}{th('availableRooms','可售房')}{th('rp','理论RP')}{th('bookingRateChange','预订率环比')}{th('adrChange','ADR环比')}{th('rpChange','RP环比')}</tr></thead>
       <tbody>{pageRows.map(item => <tr key={item.row.whCode} onClick={() => onStore(item.row)}>
-        <td><b>{item.row.name}</b><small>{item.row.whCode}</small></td><td>{item.row.province}<small>{item.row.area}</small></td><td>{item.row.city}<small>{item.row.revenueZone || '--'}</small></td>
-        <td>{fmtPct(item.row.bookingRate)}</td><td>{fmtMoney(item.row.adr)}</td><td><b>{item.maxChannel}</b><small>{fmtPct(item.maxShare)}</small></td>
+        <td><b>{item.row.name}</b><small>{item.row.whCode}</small></td><td>{item.row.province}</td><td>{item.row.area}</td><td>{item.row.city}</td><td>{item.row.revenueZone || '--'}</td>
+        <td>{fmtPct(item.row.bookingRate)}</td><td>{fmtMoney(item.row.adr)}</td><td><b className="max-channel-tag">{item.maxChannel}</b><small>{fmtPct(item.maxShare)}</small></td>
         <td>{fmtPct(item.mix.ota)}</td><td>{fmtPct(item.mix.online)}</td><td>{fmtPct(item.mix.offline)}</td><td>{fmtPct(item.mix.ctrip)}</td><td>{fmtPct(item.mix.meituan)}</td><td>{fmtPct(item.mix.fliggy)}</td>
         <td className={item.channelAdrIssue === '--' ? '' : 'negative'}>{item.channelAdrIssue}</td><td><div className="channel-anomaly-tags">{item.tags.map(tag => <em key={tag}>{tag}</em>)}</div></td>
-        <td><span className={`channel-risk risk-${item.risk}`}>{RISK_LABEL[item.risk]}</span></td>
+        <td><span className={`channel-risk risk-${item.risk}`}>{RISK_LABEL[item.risk]}</span></td><td>{item.row.bookedRooms.toLocaleString()}</td><td>{fmtMoney(item.row.bookingRevenue)}</td><td>{item.row.availableRooms.toLocaleString()}</td><td>{fmtMoney(item.row.rp)}</td>
+        <td className={(bookingRateChange(item.row) || 0) < 0 ? 'negative' : 'positive'}>{fmtPp(bookingRateChange(item.row))}</td><td className={(adrChange(item.row) || 0) < 0 ? 'negative' : 'positive'}>{fmtMoney(adrChange(item.row))}</td><td className={(rpChange(item.row) || 0) < 0 ? 'negative' : 'positive'}>{fmtMoney(rpChange(item.row))}</td>
       </tr>)}</tbody>
     </table></div>
-    <div className="channel-store-pagination"><span>第 {Math.min(page, pages)} / {pages} 页 · 共 {filtered.length} 家</span><button disabled={page <= 1} onClick={() => setPage(value => value - 1)}><ChevronLeft/>上一页</button><button disabled={page >= pages} onClick={() => setPage(value => value + 1)}>下一页<ChevronRight/></button></div>
+    <div className="channel-store-pagination"><label>每页显示 <select value={pageSize} onChange={event => setPageSize(Number(event.target.value))}><option value={10}>10</option><option value={20}>20</option><option value={50}>50</option></select></label><span>第 {currentPage} / {pages} 页 · 共 {filtered.length} 家</span><button disabled={page <= 1} onClick={() => setPage(value => value - 1)}><ChevronLeft/>上一页</button><button disabled={page >= pages} onClick={() => setPage(value => value + 1)}>下一页<ChevronRight/></button></div>
     {!filtered.length && <div className="channel-store-empty"><AlertTriangle/>当前筛选下未识别到门店渠道异常</div>}
   </section>
 }

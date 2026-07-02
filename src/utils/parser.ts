@@ -1,5 +1,5 @@
 import { read, utils } from 'xlsx'
-import type { DataKind, Hotel, LastYearRecord, QualityIssue, RenovationRecord, SnapshotRecord } from '../types/data'
+import type { DataKind, Hotel, LastYearRecord, QualityIssue, RenovationRecord, SameLeadSnapshotRecord, SnapshotRecord } from '../types/data'
 import { normalizeChannel } from './channelMapping'
 
 export async function readFile(file: File) {
@@ -36,7 +36,7 @@ const date = (v: unknown) => {
   return Number.isNaN(d.getTime()) ? s.replace(/\//g, '-') : d.toISOString().slice(0, 10)
 }
 const val = (row: Record<string, unknown>, map: Record<string, string>, key: string) => row[map[key]]
-const validDate = (value: string) => {
+export const validDate = (value: string) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
   const parsed = new Date(`${value}T00:00:00Z`)
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
@@ -101,6 +101,20 @@ export function validateUploadStructure(rows: Record<string, unknown>[], kind: D
       if (map[key] && !values(key).some(parsableNumber)) issues.push(structureIssue(structureLabels[key], `${structureLabels[key]}字段完全无法解析`))
     })
   }
+  if (kind === 'sameLeadSnapshots') {
+    requireMappings(['whCode', 'date', 'bookedRooms', 'bookingRevenue', 'availableRooms'])
+    if (map.date && !values('date').some(value => validDate(date(value)))) {
+      issues.push(structureIssue('年月日', '年月日字段完全无法识别'))
+    }
+    if (map.whCode && map.date && map.bookedRooms && map.bookingRevenue && map.availableRooms && !rows.some(row =>
+      str(row[map.whCode]) &&
+      validDate(date(row[map.date])) &&
+      parsableNumber(row[map.bookedRooms]) &&
+      parsableNumber(row[map.bookingRevenue])
+    )) {
+      issues.push(structureIssue('有效数据行', '完全没有可识别WH编码、年月日、预订房间数及预订总价的有效数据行'))
+    }
+  }
   if (kind === 'renovations') requireMappings(['whCode', 'renovationType'])
   return issues
 }
@@ -125,6 +139,15 @@ export function normalizeRows(rows: Record<string, unknown>[], kind: DataKind, m
     channel: normalizeChannel(val(r, map, 'channel'), channelMap), channelNights: num(val(r, map, 'channelNights')),
     channelRevenue: num(val(r, map, 'channelRevenue')),
   } satisfies LastYearRecord))
+  if (kind === 'sameLeadSnapshots') return rows.map(r => ({
+    name: str(val(r, map, 'name')),
+    whCode: str(val(r, map, 'whCode')),
+    date: date(val(r, map, 'date')),
+    bookedRooms: num(val(r, map, 'bookedRooms')),
+    pricedRooms: num(val(r, map, 'pricedRooms')),
+    bookingRevenue: num(val(r, map, 'bookingRevenue')),
+    availableRooms: num(val(r, map, 'availableRooms')),
+  } satisfies SameLeadSnapshotRecord))
   if (kind === 'renovations') return rows.map(r => ({
     whCode: str(val(r, map, 'whCode')), name: str(val(r, map, 'name')),
     renovationType: str(val(r, map, 'renovationType')),
@@ -155,12 +178,12 @@ export function normalizeRows(rows: Record<string, unknown>[], kind: DataKind, m
   })
 }
 
-export function validateRows(rows: Array<Hotel | LastYearRecord | SnapshotRecord | RenovationRecord>, kind: DataKind): QualityIssue[] {
+export function validateRows(rows: Array<Hotel | LastYearRecord | SnapshotRecord | SameLeadSnapshotRecord | RenovationRecord>, kind: DataKind): QualityIssue[] {
   const issues: QualityIssue[] = []
   const seen = new Map<string, number>()
   const snapshotGroups = new Map<string, { row: number; available: number[]; booked: number }>()
   rows.forEach((r, i) => {
-    if (!r.whCode) issues.push({ level: kind === 'lastYear' || kind === 'hotels' ? 'warning' : 'error', row: i + 2, field: 'WH编码', message: 'WH编码为空' })
+    if (!r.whCode) issues.push({ level: kind === 'lastYear' || kind === 'hotels' || kind === 'sameLeadSnapshots' ? 'warning' : 'error', row: i + 2, field: 'WH编码', message: 'WH编码为空' })
     if (kind === 'hotels') {
       const h = r as Hotel
       if (h.whCode && seen.has(h.whCode)) issues.push({ level: 'warning', row: i + 2, field: '酒店WH编码', message: `与第${seen.get(h.whCode)}行重复，请核对主数据` }); else if (h.whCode) seen.set(h.whCode, i + 2)
@@ -193,6 +216,13 @@ export function validateRows(rows: Array<Hotel | LastYearRecord | SnapshotRecord
       if (s.availableRooms > 0) snapshotGroup.available.push(s.availableRooms)
       snapshotGroup.booked += Number.isFinite(s.bookedRooms) ? s.bookedRooms : 0
       snapshotGroups.set(key, snapshotGroup)
+    }
+    if (kind === 'sameLeadSnapshots') {
+      const sameLead = r as SameLeadSnapshotRecord
+      if (!validDate(sameLead.date)) issues.push({ level: 'warning', row: i + 2, field: '年月日', message: '该行年月日无法识别，保存时将跳过' })
+      if (sameLead.availableRooms <= 0) issues.push({ level: 'warning', row: i + 2, field: '可售房间数', message: '可售房为空或为0，同提前期预订率和理论RP将安全显示为 --' })
+      if (sameLead.pricedRooms <= 0 && sameLead.bookedRooms > 0) issues.push({ level: 'warning', row: i + 2, field: '有房价的预订房间数', message: '有房价预订房间数为空或为0，同提前期ADR将显示为 --' })
+      if (sameLead.bookingRevenue < 0) issues.push({ level: 'warning', row: i + 2, field: '预订总价', message: '预订总价小于0，请核验历史快照' })
     }
     if (kind === 'renovations') {
       const renovation = r as RenovationRecord

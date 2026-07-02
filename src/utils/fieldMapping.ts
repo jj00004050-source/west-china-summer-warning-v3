@@ -60,6 +60,15 @@ export const SCHEMAS: Record<DataKind, Record<string, string[]>> = {
     channelAdr: ['渠道在手ADR', '渠道ADR'],
     channelBookingRate: ['渠道预订率'],
   },
+  sameLeadSnapshots: {
+    name: ['酒店名称', '门店名称', 'hotelName'],
+    whCode: ['酒店WH编码', 'WH编码', '酒店编码', '门店编码', 'hotelId', 'whcode'],
+    date: ['年月日', '日期', '目标入住日期', '入住日期'],
+    bookedRooms: ['预订房间总数（已售房）', '预订房间总数(已售房)', '预订房间总数', '预订房间数', '已售房', '已售房间数'],
+    pricedRooms: ['有房价的预订房间数', '有房价预订房间数', '有价间夜'],
+    bookingRevenue: ['预订总价', '预订收入', '在手收入'],
+    availableRooms: ['可售房间数', '可售房数', '可售房', '可售房量'],
+  },
   renovations: {
     whCode: ['酒店WH编码', 'WH编码', '酒店编码', '门店编码'],
     name: ['酒店名称', '门店名称'],
@@ -91,5 +100,6 @@ export const FIELD_LABELS: Record<string, string> = {
   bookedRooms: '预订房间总数', pricedRooms: '有房价预订房间数', bookingRevenue: '预订总价',
   bookingRate: '预订率', onHandAdr: '在手ADR', theoreticalRp: '理论RP', channel: '渠道名称',
   channelNights: '渠道预订间夜', channelRevenue: '渠道预订收入', channelAdr: '渠道ADR',
+  sameLeadSnapshots: '同期同提前期预订快照', 
   renovationType: '改造类型',
 }

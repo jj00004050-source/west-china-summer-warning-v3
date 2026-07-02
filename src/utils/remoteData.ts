@@ -3,6 +3,7 @@ import type {
   PreviousFinalSnapshot,
   QualityIssue,
   RenovationRecord,
+  SameLeadSnapshotRecord,
   SnapshotBatch,
   StoredData,
 } from '../types/data'
@@ -21,11 +22,16 @@ export interface RemoteDashboardManifest {
   arrays: {
     hotels: string[]
     lastYear: string[]
+    sameLeadSnapshots?: string[]
     renovations: string[]
     qualityIssues: string[]
+    publicLastYear?: string[]
+    publicSameLeadSnapshots?: string[]
   }
   batches: RemoteBatchManifest[]
+  publicBatches?: RemoteBatchManifest[]
   previousFinalSnapshot?: RemotePreviousSnapshotManifest
+  publicPreviousFinalSnapshot?: RemotePreviousSnapshotManifest
   state: Pick<StoredData, 'currentBaseDate' | 'mappings' | 'channelMappings' | 'settings'>
 }
 
@@ -37,10 +43,15 @@ export interface RemoteDataEnvelope {
 export const remoteChunkKeys = (manifest: RemoteDashboardManifest) => [
   ...manifest.arrays.hotels,
   ...manifest.arrays.lastYear,
+  ...(manifest.arrays.sameLeadSnapshots || []),
   ...manifest.arrays.renovations,
   ...manifest.arrays.qualityIssues,
+  ...(manifest.arrays.publicLastYear || []),
+  ...(manifest.arrays.publicSameLeadSnapshots || []),
   ...manifest.batches.flatMap(batch => batch.rowKeys),
+  ...(manifest.publicBatches || []).flatMap(batch => batch.rowKeys),
   ...(manifest.previousFinalSnapshot?.rowKeys || []),
+  ...(manifest.publicPreviousFinalSnapshot?.rowKeys || []),
 ]
 
 async function loadArray<T>(keys: string[], loadChunk: (key: string) => Promise<T[]>): Promise<T[]> {
@@ -52,29 +63,36 @@ async function loadArray<T>(keys: string[], loadChunk: (key: string) => Promise<
 export async function hydrateRemoteData(
   manifest: RemoteDashboardManifest,
   loadChunk: <T>(key: string) => Promise<T[]>,
+  publicOptimized = false,
 ): Promise<StoredData> {
-  const [hotels, lastYear, renovations, qualityIssues, batches, previousRows] = await Promise.all([
+  const sourceBatches = publicOptimized && manifest.publicBatches ? manifest.publicBatches : manifest.batches
+  const lastYearKeys = publicOptimized && manifest.arrays.publicLastYear ? manifest.arrays.publicLastYear : manifest.arrays.lastYear
+  const sameLeadKeys = publicOptimized && manifest.arrays.publicSameLeadSnapshots ? manifest.arrays.publicSameLeadSnapshots : (manifest.arrays.sameLeadSnapshots || [])
+  const previousManifest = publicOptimized && manifest.publicPreviousFinalSnapshot ? manifest.publicPreviousFinalSnapshot : manifest.previousFinalSnapshot
+  const [hotels, lastYear, sameLeadSnapshots, renovations, qualityIssues, batches, previousRows] = await Promise.all([
     loadArray(manifest.arrays.hotels, loadChunk),
-    loadArray(manifest.arrays.lastYear, loadChunk),
+    loadArray(lastYearKeys, loadChunk),
+    loadArray<SameLeadSnapshotRecord>(sameLeadKeys, loadChunk),
     loadArray<RenovationRecord>(manifest.arrays.renovations, loadChunk),
-    loadArray<QualityIssue>(manifest.arrays.qualityIssues, loadChunk),
-    Promise.all(manifest.batches.map(async batch => {
+    publicOptimized ? Promise.resolve([]) : loadArray<QualityIssue>(manifest.arrays.qualityIssues, loadChunk),
+    Promise.all(sourceBatches.map(async batch => {
       const { rowKeys, ...meta } = batch
       return { ...meta, rows: await loadArray(rowKeys, loadChunk) } as SnapshotBatch
     })),
-    manifest.previousFinalSnapshot
-      ? loadArray(manifest.previousFinalSnapshot.rowKeys, loadChunk)
+    previousManifest
+      ? loadArray(previousManifest.rowKeys, loadChunk)
       : Promise.resolve([]),
   ])
-  const previousFinalSnapshot = manifest.previousFinalSnapshot
+  const previousFinalSnapshot = previousManifest
     ? (() => {
-        const { rowKeys: _rowKeys, ...meta } = manifest.previousFinalSnapshot!
+        const { rowKeys: _rowKeys, ...meta } = previousManifest
         return { ...meta, rows: previousRows } as PreviousFinalSnapshot
       })()
     : undefined
   return {
     hotels: hotels as StoredData['hotels'],
     lastYear: lastYear as StoredData['lastYear'],
+    sameLeadSnapshots,
     renovations,
     batches,
     previousFinalSnapshot,
@@ -84,6 +102,7 @@ export async function hydrateRemoteData(
     channelMappings: manifest.state.channelMappings,
     settings: manifest.state.settings,
     version: manifest.version,
+    publicOptimized,
   }
 }
 

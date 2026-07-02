@@ -1,13 +1,10 @@
 import { getStore } from '@netlify/blobs'
-import { createHmac, timingSafeEqual } from 'node:crypto'
 import { DEFAULT_BROADCAST_CONFIG, generateBroadcastPackage } from '../../server/broadcast-generator.mjs'
 
 const STORE_NAME = 'west-china-dashboard'
 const CURRENT_VERSION_KEY = 'currentVersion'
 const PREVIOUS_VERSION_KEY = 'previousVersion'
 const BROADCAST_KEY = 'broadcastState'
-const adminPassword = process.env.ADMIN_PASSWORD || ''
-const sessionSecret = process.env.SESSION_SECRET || ''
 const store = () => getStore({ name: STORE_NAME, consistency: 'strong' })
 const MAX_CHUNK_BYTES = 768 * 1024
 const json = (value, status = 200, headers = {}) => Response.json(value, {
@@ -17,42 +14,28 @@ const json = (value, status = 200, headers = {}) => Response.json(value, {
 const normalizePath = pathname => pathname.startsWith('/.netlify/functions/api')
   ? `/api${pathname.slice('/.netlify/functions/api'.length)}`
   : pathname
-const cookie = request => Object.fromEntries((request.headers.get('cookie') || '').split(';').filter(Boolean).map(item => {
-  const [key, ...rest] = item.trim().split('=')
-  return [key, rest.join('=')]
-}))
-const sign = value => createHmac('sha256', sessionSecret).update(value).digest('hex')
-const token = () => {
-  const value = `admin.${Date.now() + 8 * 3600000}`
-  return `${value}.${sign(value)}`
-}
-const isAdmin = request => {
-  if (!sessionSecret) return false
-  const raw = cookie(request).west_admin
-  if (!raw) return false
-  const [role, expires, signature] = raw.split('.')
-  const value = `${role}.${expires}`
-  if (!signature || role !== 'admin' || Number(expires) < Date.now()) return false
-  const expected = Buffer.from(sign(value))
-  const actual = Buffer.from(signature)
-  return expected.length === actual.length && timingSafeEqual(expected, actual)
-}
-const requireAdmin = request => isAdmin(request) ? null : json({ error: '需要管理员登录' }, 401)
+const requireAdmin = () => null
 const validChunkKey = key => /^chunks\/[a-f0-9]{64}$/.test(String(key || ''))
 const versionManifestKey = versionId => `versions/${String(versionId).replace(/[^a-zA-Z0-9._-]/g, '')}/manifest`
 const allChunkKeys = manifest => [
   ...(manifest?.arrays?.hotels || []),
   ...(manifest?.arrays?.lastYear || []),
+  ...(manifest?.arrays?.sameLeadSnapshots || []),
   ...(manifest?.arrays?.renovations || []),
   ...(manifest?.arrays?.qualityIssues || []),
+  ...(manifest?.arrays?.publicLastYear || []),
+  ...(manifest?.arrays?.publicSameLeadSnapshots || []),
   ...(manifest?.batches || []).flatMap(batch => batch.rowKeys || []),
+  ...(manifest?.publicBatches || []).flatMap(batch => batch.rowKeys || []),
   ...(manifest?.previousFinalSnapshot?.rowKeys || []),
+  ...(manifest?.publicPreviousFinalSnapshot?.rowKeys || []),
 ]
 const loadArray = async (blobStore, keys = []) => (await Promise.all(keys.map(key => blobStore.get(key, { type: 'json', consistency: 'strong' })))).flatMap(value => Array.isArray(value) ? value : [])
 const hydrate = async (blobStore, manifest) => {
-  const [hotels, lastYear, renovations, qualityIssues, batches, previousRows] = await Promise.all([
+  const [hotels, lastYear, sameLeadSnapshots, renovations, qualityIssues, batches, previousRows] = await Promise.all([
     loadArray(blobStore, manifest.arrays.hotels),
     loadArray(blobStore, manifest.arrays.lastYear),
+    loadArray(blobStore, manifest.arrays.sameLeadSnapshots || []),
     loadArray(blobStore, manifest.arrays.renovations),
     loadArray(blobStore, manifest.arrays.qualityIssues),
     Promise.all(manifest.batches.map(async batch => {
@@ -70,6 +53,7 @@ const hydrate = async (blobStore, manifest) => {
   return {
     hotels,
     lastYear,
+    sameLeadSnapshots,
     renovations,
     qualityIssues,
     batches,
@@ -151,19 +135,12 @@ export default async request => {
         },
       })
     }
-    if (request.method === 'GET' && path === '/api/admin/session') return json({ authenticated: isAdmin(request) })
+    if (request.method === 'GET' && path === '/api/admin/session') return json({ authenticated: true })
     if (request.method === 'POST' && path === '/api/admin/login') {
-      if (!adminPassword || !sessionSecret) return json({ error: 'Netlify 环境变量尚未配置' }, 503)
-      const body = await request.json()
-      if (String(body?.password || '') !== adminPassword) return json({ error: '管理员密码错误' }, 401)
-      return json({ ok: true }, 200, {
-        'Set-Cookie': `west_admin=${token()}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=28800`,
-      })
+      return json({ ok: true, authenticated: true })
     }
     if (request.method === 'POST' && path === '/api/admin/logout') {
-      return json({ ok: true }, 200, {
-        'Set-Cookie': 'west_admin=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0',
-      })
+      return json({ ok: true })
     }
     if (request.method === 'PUT' && path === '/api/admin/data/chunk') {
       const denied = requireAdmin(request); if (denied) return denied

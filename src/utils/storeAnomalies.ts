@@ -216,7 +216,7 @@ export function analyzeStore(row: MetricRow, zoneRate: number | null, mix: Store
   )
   const riskNeutralTags = new Set(['RP缺口大'])
   const hasActionableAttention = businessTags.some(tag => !riskNeutralTags.has(tag)) ||
-    ['价格偏高风险', '低价接量风险'].includes(context.priceAdviceLabel || '')
+    ['价格偏高风险', '高量低价风险'].includes(context.priceAdviceLabel || '')
   const attention = !high && !medium && hasActionableAttention
   const methodology = !high && !medium && !attention && (statusTags.length > 0 || dataTags.length > 0)
   const grade: StoreRiskGrade = high ? 'S' : medium ? 'A' : attention ? 'B' : methodology ? 'C' : 'normal'

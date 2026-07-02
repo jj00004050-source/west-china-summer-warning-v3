@@ -80,6 +80,14 @@ function aggregate(currentRows, comparisonRows = []) {
   const lastOcc = comparisonRows.length ? ratio(lastSold, lastAvailable) : null
   const lastAdr = comparisonRows.length ? ratio(lastRevenue, lastSold) : null
   const lastRp = comparisonRows.length ? ratio(lastRevenue, lastAvailable) : null
+  const sameLeadRows = currentRows.filter(row => row.sameLeadMatched)
+  const sameLeadAvailableRooms = sum(sameLeadRows.map(row => row.sameLeadAvailableRooms))
+  const sameLeadBookedRooms = sum(sameLeadRows.map(row => row.sameLeadBookedRooms))
+  const sameLeadPricedRooms = sum(sameLeadRows.map(row => row.sameLeadPricedRooms))
+  const sameLeadRevenue = sum(sameLeadRows.map(row => row.sameLeadRevenue))
+  const sameLeadBookingRate = sameLeadRows.length ? ratio(sameLeadBookedRooms, sameLeadAvailableRooms) : null
+  const sameLeadAdr = sameLeadRows.length ? ratio(sameLeadRevenue, sameLeadPricedRooms) : null
+  const sameLeadRp = sameLeadRows.length ? ratio(sameLeadRevenue, sameLeadAvailableRooms) : null
   return {
     availableRooms, bookedRooms, pricedRooms, revenue, bookingRate, adr, rp,
     lastAvailable, lastSold, lastRevenue, lastOcc, lastAdr, lastRp,
@@ -87,6 +95,10 @@ function aggregate(currentRows, comparisonRows = []) {
     adrGap: adr != null && lastAdr != null ? adr - lastAdr : null,
     rpGap: rp != null && lastRp != null ? rp - lastRp : null,
     recovery: rp != null && lastRp ? rp / lastRp : null,
+    sameLeadBookingRate, sameLeadAdr, sameLeadRp,
+    sameLeadBookingRateGap: bookingRate != null && sameLeadBookingRate != null ? bookingRate - sameLeadBookingRate : null,
+    sameLeadAdrGap: adr != null && sameLeadAdr != null ? adr - sameLeadAdr : null,
+    sameLeadRpGap: rp != null && sameLeadRp != null ? rp - sameLeadRp : null,
   }
 }
 
@@ -212,6 +224,8 @@ export function generateBroadcastPackage(data, request = {}) {
     return { whCode, ...hotel, ...lastYearMetric(records) }
   })
   const comparisonByCode = new Map(comparisonRows.map(row => [row.whCode, row]))
+  const sameLeadSource = (data.sameLeadSnapshots || []).filter(row => row.date === lastDate)
+  const sameLeadByCode = group(sameLeadSource, row => row.whCode)
   const countMissing = data.settings?.countMissingBookingAsZero !== false
   const renovationByCode = new Map((data.renovations || []).map(record => [record.whCode, record]))
 
@@ -224,6 +238,8 @@ export function generateBroadcastPackage(data, request = {}) {
     const lastOcc = last ? ratio(last.soldRooms, last.availableRooms) : null
     const lastAdr = last ? ratio(last.revenue, last.soldRooms) : null
     const lastRp = last ? ratio(last.revenue, last.availableRooms) : null
+    const sameLeadRecords = sameLeadByCode[hotel.whCode] || []
+    const sameLead = snapshotMetric(sameLeadRecords)
     return {
       ...hotel,
       ...current,
@@ -233,6 +249,14 @@ export function generateBroadcastPackage(data, request = {}) {
       lastOcc,
       lastAdr,
       lastRp,
+      sameLeadMatched: sameLeadRecords.length > 0,
+      sameLeadAvailableRooms: sameLead.availableRooms,
+      sameLeadBookedRooms: sameLead.bookedRooms,
+      sameLeadPricedRooms: sameLead.pricedRooms,
+      sameLeadRevenue: sameLead.revenue,
+      sameLeadBookingRate: sameLeadRecords.length ? sameLead.bookingRate : null,
+      sameLeadAdr: sameLeadRecords.length ? sameLead.adr : null,
+      sameLeadRp: sameLeadRecords.length ? sameLead.rp : null,
       occGap: current.bookingRate != null && lastOcc != null ? current.bookingRate - lastOcc : null,
       adrGap: current.adr != null && lastAdr != null ? current.adr - lastAdr : null,
       rpGap: current.rp != null && lastRp != null ? current.rp - lastRp : null,
@@ -307,7 +331,7 @@ export function generateBroadcastPackage(data, request = {}) {
     const highPrice = zoneAdrGap >= priceConfig.highAdrAmount || row.adr >= zone.adr * (1 + priceConfig.highAdrRate)
     const lowPrice = zoneAdrGap <= -priceConfig.lowAdrAmount || row.adr <= zone.adr * (1 - priceConfig.lowAdrRate)
     if ((highPrice && zoneRateGap < 0) || ((row.adrChange || 0) > 5 && (row.bookingRateChange || 0) < 0)) return '价格偏高风险'
-    if ((row.bookingRateChange || 0) > 0 && (row.adrChange || 0) < -10 && lowPrice) return '低价接量风险'
+    if ((row.bookingRateChange || 0) > 0 && (row.adrChange || 0) < -10 && lowPrice) return '高量低价风险'
     const action = basePriceAction(row)
     if (zoneRateGap <= -.1 && (row.bookingRateChange == null || row.bookingRateChange <= 0) && ['强烈建议提价', '建议提价', '建议小幅提价', '阶梯式提价'].includes(action)) return '保持观察'
     return action
@@ -404,7 +428,7 @@ export function generateBroadcastPackage(data, request = {}) {
     const attention = !high && !medium && !row.missing && (
       (row.bookingRate != null && row.bookingRate < .1) ||
       (row.zoneGap != null && row.zoneGap < 0) ||
-      ['价格偏高风险', '低价接量风险'].includes(row.priceAdvice) ||
+      ['价格偏高风险', '高量低价风险'].includes(row.priceAdvice) ||
       storeChannelRisks.some(item => item.row.whCode === row.whCode) ||
       !!row.specialZoneType
     )
@@ -433,7 +457,7 @@ export function generateBroadcastPackage(data, request = {}) {
     return !!mix?.total && mix.offline >= .999
   })
   const highPriceStores = storeRows.filter(row => row.priceAdvice === '价格偏高风险')
-  const lowPriceVolumeStores = storeRows.filter(row => row.priceAdvice === '低价接量风险')
+  const lowPriceVolumeStores = storeRows.filter(row => row.priceAdvice === '高量低价风险')
   const strongPriceStores = storeRows.filter(row => row.priceAdvice === '强烈建议提价')
   const stairPriceStores = storeRows.filter(row => ['阶梯式提价', '建议小幅提价', '建议提价'].includes(row.priceAdvice))
   const controlCheckStores = storeRows.filter(row => row.bookingRate != null && row.bookingRate >= .8)
@@ -483,7 +507,8 @@ export function generateBroadcastPackage(data, request = {}) {
     zeroStores.length >= Math.max(5, Math.ceil(storeRows.length * .1)) ? '0预定门店需优先排查渠道展示、库存状态、价格竞争力和是否异常关房。' : '',
     highBookingStores.length >= Math.max(5, Math.ceil(storeRows.length * .05)) ? '高预订门店需核实真实预订和控房情况，优先做好库存兑现和满房质量。' : '',
   ].filter(Boolean).join('')
-  const overallText = `${scheduleTime ? `${scheduleTime}预警，` : ''}本次重点播报今日入住日${cnDate(targetDate)}${phase}表现，同时覆盖未来7天预警。\n${scopeLabel}今日预订率${pct(overall.bookingRate)}，${ringText(overallChange)}；在手ADR${money(overall.adr)}元，理论RP${money(overall.rp)}。\n当前预订率为0门店${zeroStores.length}家，预订率大于80%门店${highBookingStores.length}家。\n${overallJudgments}`
+  const sameLeadText = overall.sameLeadBookingRateGap == null ? '' : `，较同期同提前期开盘预订率${overall.sameLeadBookingRateGap >= 0 ? '提升' : '下降'}${(Math.abs(overall.sameLeadBookingRateGap) * 100).toFixed(2)}pp`
+  const overallText = `${scheduleTime ? `${scheduleTime}预警，` : ''}本次重点播报今日入住日${cnDate(targetDate)}${phase}表现，同时覆盖未来7天预警。\n${scopeLabel}今日预订率${pct(overall.bookingRate)}，${ringText(overallChange)}${sameLeadText}；在手ADR${money(overall.adr)}元，理论RP${money(overall.rp)}。\n当前预订率为0门店${zeroStores.length}家，预订率大于80%门店${highBookingStores.length}家。\n${overallJudgments}`
 
   const provinceText = `省区表现方面，${bestProvince ? `${bestProvince.name}预订率最高，达到${pct(bestProvince.bookingRate)}` : '暂无可比省区'}；低位省区为${itemText(lowProvinces, item => `${item.name}${pct(item.bookingRate)}`)}。\n高预订省区重点关注高预订门店价格兑现和满房质量；低预订省区重点关注低预订、渠道展示和商圈承接不足门店。`
 
@@ -494,18 +519,18 @@ export function generateBroadcastPackage(data, request = {}) {
   const areaAdrFall = topNegative(areas, 'adrChange')
   const areaRateRise = topPositive(areas, 'bookingRateChange')
   const areaRateFall = topNegative(areas, 'bookingRateChange')
-  const areaText = `片区表现按今日RP缺口看，RP缺口较小的三个片区为：${itemText(areaRpSmall, item => `${item.name}（RP缺口${signedMoney(item.rpGap)}）`)}；RP缺口较大的三个片区为：${itemText(areaRpLarge, item => `${item.name}（RP缺口${signedMoney(item.rpGap)}）`)}。\n异常门店数最多的片区为：${itemText(areaAbnormal, item => `${item.name}（异常门店${item.abnormalCount}家）`)}。\n0预定门店最多的片区为：${itemText(areaZero, item => `${item.name}（0预定${item.zeroCount}家）`)}。\nADR环比下滑最多的三个片区为：${itemText(areaAdrFall, item => `${item.name}（ADR环比${signedMoney(item.adrChange)}元）`, '暂无明显下滑')}。\n预订率环比提升最多的三个片区为：${itemText(areaRateRise, item => `${item.name}（环比${pp(item.bookingRateChange)}）`, '暂无明显提升')}；预订率环比下滑最多的三个片区为：${itemText(areaRateFall, item => `${item.name}（环比${pp(item.bookingRateChange)}）`, '暂无明显下滑')}。\n片区跟进上，RP缺口较大的片区需优先排查低预订和渠道承接；ADR环比下滑片区需关注是否存在低价接量、活动价放大或房型价差失衡；预订率环比提升片区可关注房型结构优化和阶梯式提价机会。`
+  const areaText = `片区表现按今日RP缺口看，RP缺口较小的三个片区为：${itemText(areaRpSmall, item => `${item.name}（RP缺口${signedMoney(item.rpGap)}）`)}；RP缺口较大的三个片区为：${itemText(areaRpLarge, item => `${item.name}（RP缺口${signedMoney(item.rpGap)}）`)}。\n异常门店数最多的片区为：${itemText(areaAbnormal, item => `${item.name}（异常门店${item.abnormalCount}家）`)}。\n0预定门店最多的片区为：${itemText(areaZero, item => `${item.name}（0预定${item.zeroCount}家）`)}。\nADR环比下滑最多的三个片区为：${itemText(areaAdrFall, item => `${item.name}（ADR环比${signedMoney(item.adrChange)}元）`, '暂无明显下滑')}。\n预订率环比提升最多的三个片区为：${itemText(areaRateRise, item => `${item.name}（环比${pp(item.bookingRateChange)}）`, '暂无明显提升')}；预订率环比下滑最多的三个片区为：${itemText(areaRateFall, item => `${item.name}（环比${pp(item.bookingRateChange)}）`, '暂无明显下滑')}。\n片区跟进上，预订承接偏弱片区需优先排查低预订和渠道承接；ADR环比下滑片区需关注量升价降、高量低价、活动价放大或房型价差失衡；预订率环比提升片区可关注房型结构优化和阶梯式提价机会。`
 
   const zoneChanges = [...zones].filter(item => item.bookingRateChange != null).sort((a, b) => Math.abs(b.bookingRateChange) - Math.abs(a.bookingRateChange)).slice(0, 3)
   const zoneFalls = topNegative(zones, 'bookingRateChange')
   const zoneAbnormal = [...zones].sort((a, b) => b.abnormalCount - a.abnormalCount).slice(0, 3)
   const specialZoneRows = storeRows.filter(row => row.specialZoneType)
   const coreLowRows = specialZoneRows.filter(row => row.specialZoneType === '核心商圈' && (row.bookedRooms === 0 || (row.zoneGap != null && row.zoneGap < 0)))
-  const scenicLowPriceRows = specialZoneRows.filter(row => row.specialZoneType === '景区商圈' && row.priceAdvice === '低价接量风险')
+  const scenicLowPriceRows = specialZoneRows.filter(row => row.specialZoneType === '景区商圈' && row.priceAdvice === '高量低价风险')
   const corePriceRows = specialZoneRows.filter(row => row.specialZoneType === '核心商圈' && priceOpportunityStores.some(item => item.whCode === row.whCode))
   const specialSummary = [
     coreLowRows.length ? `核心商圈低预订${coreLowRows.length}家，优先排查渠道展示和价格竞争力` : '',
-    scenicLowPriceRows.length ? `景区低价接量${scenicLowPriceRows.length}家，需防止以低价换量` : '',
+    scenicLowPriceRows.length ? `景区高量低价关注${scenicLowPriceRows.length}家，需检查渠道价格与房型价差` : '',
     corePriceRows.length ? `核心商圈提价机会${corePriceRows.length}家，结合库存和竞对价库及时调整` : '',
   ].filter(Boolean).join('；')
   const zoneText = `核心商圈方面，表现变化最大的收益管理商圈为：${itemText(zoneChanges, item => `${item.name}（预订率环比${pp(item.bookingRateChange)}）`)}。\n环比下降明显的收益管理商圈前三为：${itemText(zoneFalls, item => `${item.name}（预订率环比${pp(item.bookingRateChange)}）`, '暂无明显下滑')}。\n异常门店集中的收益管理商圈前三为：${itemText(zoneAbnormal, item => `${item.name}（异常门店${item.abnormalCount}家）`)}。\n${specialSummary || '当前核心商圈暂无明显异常。'}`
@@ -523,7 +548,7 @@ export function generateBroadcastPackage(data, request = {}) {
     : runNo === 2
       ? '午盘阶段是价格动作分化的关键时点。高预订且ADR仍有空间的门店，可结合竞对价库和剩余库存做阶梯式提价；预订率低且进速慢的门店，优先通过渠道补量和价格展示修复转化。'
       : '因已进入晚间跑批，直接大幅提价不一定现实。高预订门店应优先核实真实预订和控房情况，以满房和库存兑现为主；可通过优化房型结构、关闭低价房型、调整房型价差来达成提价目的。对于明日及后续高需求日期，可提前做价格上探和房型结构调整。'
-  const priceText = `价格动作建议方面，强烈建议提价门店${strongPriceStores.length}家，阶梯式提价门店${stairPriceStores.length}家，检查控房门店${controlCheckStores.length}家。\n价格偏高风险门店${highPriceStores.length}家，低价接量风险门店${lowPriceVolumeStores.length}家。\n${priceActionByRun}`
+  const priceText = `价格动作建议方面，强烈建议提价门店${strongPriceStores.length}家，阶梯式提价门店${stairPriceStores.length}家，检查控房门店${controlCheckStores.length}家。\n价格偏高风险门店${highPriceStores.length}家，高量低价关注门店${lowPriceVolumeStores.length}家。\n${priceActionByRun}`
 
   const anomalyTypes = channelAnomalies.flatMap(item => item.tags.filter(tag => tag !== '样本量低'))
   const storeChannelTags = storeChannelRisks.flatMap(item => item.tags)
@@ -533,17 +558,17 @@ export function generateBroadcastPackage(data, request = {}) {
   }, {})
   const mainAnomalyTypes = Object.entries(anomalyCounts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([tag]) => tag)
   const channelSupplement = [
-    anomalyCounts['OTA占比偏高'] ? 'OTA占比偏高需关注低价接量和渠道依赖。' : '',
+    anomalyCounts['OTA占比偏高'] ? 'OTA占比偏高需关注渠道价格与渠道依赖。' : '',
     anomalyCounts['线上直销偏低'] ? '线上直销偏低需关注官网、小程序、会员和直销承接。' : '',
     anomalyCounts['线下直销100%'] ? '线下直销100%门店需排查渠道展示和库存同步。' : '',
-    anomalyCounts['量升价降'] ? '量升价降渠道需关注低价接量。' : '',
+    anomalyCounts['量升价降'] ? '量升价降渠道需关注收益质量。' : '',
     anomalyCounts['量价双降'] ? '量价双降渠道需关注渠道承接和价格竞争力双弱。' : '',
   ].filter(Boolean).join('')
   const channelText = `渠道结构方面，OTA / 线上直销 / 线下直销占比分别为${pct(mainChannel('各OTA')?.share)} / ${pct(mainChannel('线上直销')?.share)} / ${pct(mainChannel('线下直销')?.share)}。\n当前渠道异常主要集中在${mainAnomalyTypes.join('、') || '暂无明显渠道异常'}，涉及门店${storeChannelRisks.length}家。\n${channelSupplement || '当前主渠道量价表现基本稳定，继续观察后续环比变化。'}`
 
   const directFocus = directCounts.zero ? `0预定${directCounts.zero}家，并关注价格兑现、线上直销承接和OTA依赖` : directCounts.high ? `高风险${directCounts.high}家，并关注价格兑现和满房质量` : '价格兑现、线上直销承接、OTA依赖和满房质量'
   const newFocus = newCounts.belowZone ? `低于商圈${newCounts.belowZone}家，重点提升商圈承接能力和渠道曝光` : '商圈承接能力、低预订和渠道曝光'
-  const renovationFocus = renovatedCounts.highPrice ? `价格偏高风险${renovatedCounts.highPrice}家，并关注价格上探节奏` : '改造后承接不足、价格上探机会和低价接量'
+  const renovationFocus = renovatedCounts.highPrice ? `价格偏高风险${renovatedCounts.highPrice}家，并关注价格上探节奏` : '改造后承接不足、价格上探机会和高量低价'
   const operationLines = [
     directRows.length ? `直营店${directRows.length}家，今日预订率${pct(directMetric.bookingRate)}，0预定${directCounts.zero}家，重点关注${directFocus}。` : '直营店暂无明显异常。',
     newRows.length ? `新开店${newRows.length}家，今日预订率${pct(newMetric.bookingRate)}，低于商圈${newCounts.belowZone}家，重点关注${newFocus}。` : '新开店暂无明显异常。',
@@ -586,7 +611,7 @@ export function generateBroadcastPackage(data, request = {}) {
     ['片区关注', `${itemText(areaPriority.slice(0, 3), item => `${item.name}（高风险${item.highCount}家、0预定${item.zeroCount}家）`)}。`],
     ['核心商圈关注', `${itemText(zonePriority.slice(0, 3), item => `${item.name}（异常${item.abnormalCount}家、环比${pp(item.bookingRateChange)}）`)}。`],
     ['门店风险', `低于区域均值${belowOverallStores.length}家、低于商圈${belowZoneStores.length}家、0预定${zeroStores.length}家、预订率大于80%门店${highBookingStores.length}家。`],
-    ['提价建议', `强烈建议提价${strongPriceStores.length}家、阶梯式提价${stairPriceStores.length}家、检查控房${controlCheckStores.length}家；价格偏高${highPriceStores.length}家、低价接量${lowPriceVolumeStores.length}家。`],
+    ['提价建议', `强烈建议提价${strongPriceStores.length}家、阶梯式提价${stairPriceStores.length}家、检查控房${controlCheckStores.length}家；价格偏高${highPriceStores.length}家、高量低价关注${lowPriceVolumeStores.length}家。`],
     ['渠道变化', `OTA / 线上直销 / 线下直销占比${pct(mainChannel('各OTA')?.share)} / ${pct(mainChannel('线上直销')?.share)} / ${pct(mainChannel('线下直销')?.share)}，渠道异常影响${storeChannelRisks.length}家门店。`],
     ['直营店 / 新开店 / 改造店专项', `直营${directRows.length}家、0预定${directCounts.zero}家；新开${newRows.length}家、低于商圈${newCounts.belowZone}家；改造${renovatedRows.length}家、低预订${renovationLow}家。`],
     ['今日重点关注', `重点片区：${focusAreas.map(item => item.name).join('、') || '暂无'}；重点商圈：${focusZones.map(item => item.name).join('、') || '暂无'}。${runAction}`],

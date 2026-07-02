@@ -1,4 +1,4 @@
-import type { ComparisonRow, Hotel, LastYearRecord, MetricRow, RenovationRecord, SnapshotBatch, SnapshotRecord } from '../types/data'
+import type { ComparisonRow, Hotel, LastYearRecord, MetricRow, RenovationRecord, SameLeadSnapshotRecord, SnapshotBatch, SnapshotRecord } from '../types/data'
 import { evaluateRisk } from './riskRules'
 
 const safe = (a: number, b: number) => b ? a / b : null
@@ -35,6 +35,23 @@ function lastYearMetric(rows: LastYearRecord[]) {
   const adr = rows.find(r => r.adr != null)?.adr ?? safe(revenue, sold)
   const rp = rows.find(r => r.rp != null)?.rp ?? safe(revenue, available)
   return { occ, adr, rp, revenue: revenue || (rp != null ? rp * available : null), available, sold }
+}
+
+function sameLeadMetric(rows: SameLeadSnapshotRecord[]) {
+  if (!rows.length) return { available: null, booked: null, priced: null, revenue: null, bookingRate: null, adr: null, rp: null }
+  const available = Math.max(0, ...rows.map(row => Number(row.availableRooms) || 0))
+  const booked = sum(rows.map(row => row.bookedRooms || 0))
+  const priced = sum(rows.map(row => row.pricedRooms || 0))
+  const revenue = sum(rows.map(row => row.bookingRevenue || 0))
+  return {
+    available,
+    booked,
+    priced,
+    revenue,
+    bookingRate: safe(booked, available),
+    adr: safe(revenue, priced),
+    rp: safe(revenue, available),
+  }
 }
 
 const dateMinus364 = (targetDate: string) => {
@@ -119,6 +136,16 @@ export function missingBookingMetricRow(hotel: Hotel, targetDate: string, dayOff
     previousBookedRooms: null,
     previousPricedRooms: null,
     previousBookingRevenue: null,
+    sameLeadAvailableRooms: null,
+    sameLeadBookedRooms: null,
+    sameLeadPricedRooms: null,
+    sameLeadBookingRevenue: null,
+    sameLeadBookingRate: null,
+    sameLeadAdr: null,
+    sameLeadRp: null,
+    sameLeadBookingRateGap: null,
+    sameLeadAdrGap: null,
+    sameLeadRpGap: null,
     mainChannel: '--',
     risk: 'normal',
     tags: ['缺失预订数据', ...(hotel.rooms <= 0 ? ['物理房量缺失'] : [])],
@@ -127,13 +154,21 @@ export function missingBookingMetricRow(hotel: Hotel, targetDate: string, dayOff
   }
 }
 
-export function buildMetricRows(hotels: Hotel[], batch: SnapshotBatch | undefined, previous: SnapshotBatch | undefined, lastYear: LastYearRecord[], renovations: RenovationRecord[] = []): MetricRow[] {
+export function buildMetricRows(
+  hotels: Hotel[],
+  batch: SnapshotBatch | undefined,
+  previous: SnapshotBatch | undefined,
+  lastYear: LastYearRecord[],
+  renovations: RenovationRecord[] = [],
+  sameLeadSnapshots: SameLeadSnapshotRecord[] = [],
+): MetricRow[] {
   if (!batch) return []
   if (hotelCacheSource !== hotels) { hotelCacheSource = hotels; hotelCache = new Map(hotels.map(h => [h.whCode, h])) }
   const currentByKey = group(batch.rows, r => `${r.whCode}|${r.targetDate}`)
   const prevByKey = group(previous?.rows || [], r => `${r.whCode}|${r.targetDate}`)
   if (lastYearCacheSource !== lastYear) { lastYearCacheSource = lastYear; lastYearCache = group(lastYear, r => r.whCode) }
   const renovationsByHotel = group(renovations, record => record.whCode)
+  const sameLeadByKey = group(sameLeadSnapshots, record => `${record.whCode}|${record.date}`)
   return Object.values(currentByKey).map(rows => {
     const first = rows[0]
     const hotel = hotelCache.get(first.whCode)
@@ -142,8 +177,10 @@ export function buildMetricRows(hotels: Hotel[], batch: SnapshotBatch | undefine
     const prev = prevRows?.length ? hotelSnapshot(prevRows) : null
     const targetTime = new Date(`${first.targetDate}T00:00:00`).getTime()
     const lastDateString = new Date(targetTime - 364 * 86400000).toISOString().slice(0, 10)
+    const mappedComparisonDate = lastYear.find(record => record.mappedDate === first.targetDate)?.date || lastDateString
     const lyRows = (lastYearCache[first.whCode] || []).filter(r => r.mappedDate === first.targetDate || (!r.mappedDate && r.date === lastDateString))
     const ly = lastYearMetric(lyRows)
+    const sameLead = sameLeadMetric(sameLeadByKey[`${first.whCode}|${mappedComparisonDate}`] || [])
     const renovation = matchedRenovation(renovationsByHotel[first.whCode] || [])
     const recovery = cur.rp != null && ly.rp ? cur.rp / ly.rp : null
     const rpGap = cur.rp != null && ly.rp != null ? cur.rp - ly.rp : null
@@ -170,6 +207,12 @@ export function buildMetricRows(hotels: Hotel[], batch: SnapshotBatch | undefine
       lastAvailable: ly.available, lastSold: ly.sold, lastRevenue: ly.revenue, recovery, rpGap, revenueGap, bookingRateGap, adrGap, snapshotChange,
       previousAvailableRooms: prev?.availableRooms ?? null, previousBookedRooms: prev?.bookedRooms ?? null,
       previousPricedRooms: prev?.pricedRooms ?? null, previousBookingRevenue: prev?.bookingRevenue ?? null,
+      sameLeadAvailableRooms: sameLead.available, sameLeadBookedRooms: sameLead.booked,
+      sameLeadPricedRooms: sameLead.priced, sameLeadBookingRevenue: sameLead.revenue,
+      sameLeadBookingRate: sameLead.bookingRate, sameLeadAdr: sameLead.adr, sameLeadRp: sameLead.rp,
+      sameLeadBookingRateGap: cur.bookingRate != null && sameLead.bookingRate != null ? cur.bookingRate - sameLead.bookingRate : null,
+      sameLeadAdrGap: cur.adr != null && sameLead.adr != null ? cur.adr - sameLead.adr : null,
+      sameLeadRpGap: cur.rp != null && sameLead.rp != null ? cur.rp - sameLead.rp : null,
       mainChannel: cur.mainChannel, risk: judged.risk,
       tags: [...judged.tags, ...(hotel && hotel.rooms <= 0 ? ['物理房量缺失'] : [])],
       targetDate: first.targetDate, dayOffset: first.dayOffset,
@@ -205,12 +248,25 @@ export function aggregate(rows: MetricRow[], comparisonRows?: ComparisonRow[]) {
   const bookingRateChange = bookingRate != null && previousBookingRate != null ? bookingRate - previousBookingRate : null
   const adrChange = adr != null && previousAdr != null ? adr - previousAdr : null
   const rpChange = rp != null && previousRp != null ? rp - previousRp : null
+  const sameLeadMatched = rows.some(row => row.sameLeadAvailableRooms != null || row.sameLeadBookedRooms != null || row.sameLeadBookingRevenue != null)
+  const sameLeadAvailableRooms = sum(rows.map(row => row.sameLeadAvailableRooms || 0))
+  const sameLeadBookedRooms = sum(rows.map(row => row.sameLeadBookedRooms || 0))
+  const sameLeadPricedRooms = sum(rows.map(row => row.sameLeadPricedRooms || 0))
+  const sameLeadBookingRevenue = sum(rows.map(row => row.sameLeadBookingRevenue || 0))
+  const sameLeadBookingRate = sameLeadMatched ? safe(sameLeadBookedRooms, sameLeadAvailableRooms) : null
+  const sameLeadAdr = sameLeadMatched ? safe(sameLeadBookingRevenue, sameLeadPricedRooms) : null
+  const sameLeadRp = sameLeadMatched ? safe(sameLeadBookingRevenue, sameLeadAvailableRooms) : null
   return {
     availableRooms, bookedRooms, pricedRooms, bookingRevenue: revenue, bookingRate, adr, rp,
     lastAvailable, lastSold, lastRevenue, lastOcc, lastAdr, lastRp, recovery, revenueGap,
     snapshotChange: snapshotChangeValues.length ? sum(snapshotChangeValues) / snapshotChangeValues.length : null,
     previousAvailableRooms, previousBookedRooms, previousPricedRooms, previousBookingRevenue,
     previousBookingRate, previousAdr, previousRp, bookingRateChange, adrChange, rpChange,
+    sameLeadAvailableRooms, sameLeadBookedRooms, sameLeadPricedRooms, sameLeadBookingRevenue,
+    sameLeadBookingRate, sameLeadAdr, sameLeadRp,
+    sameLeadBookingRateGap: bookingRate != null && sameLeadBookingRate != null ? bookingRate - sameLeadBookingRate : null,
+    sameLeadAdrGap: adr != null && sameLeadAdr != null ? adr - sameLeadAdr : null,
+    sameLeadRpGap: rp != null && sameLeadRp != null ? rp - sameLeadRp : null,
     warningCount: rows.filter(r => r.risk === 'high' || r.risk === 'watch').length,
     highCount: rows.filter(r => r.risk === 'high').length,
   }

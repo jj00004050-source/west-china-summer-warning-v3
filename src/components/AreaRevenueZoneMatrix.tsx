@@ -5,6 +5,7 @@ import type { ComparisonRow, MetricRow } from '../types/data'
 import { aggregate, aggregateBy } from '../utils/metrics'
 import { fmtMoney, fmtPct, fmtPp } from '../utils/formatter'
 import BookingRateBar from './BookingRateBar'
+import MetricTrendLines from './MetricTrendLines'
 
 type SortKey = 'name' | 'rows' | 'availableRooms' | 'bookingRate' | 'lastOcc' | 'adr' | 'rp' | 'lastRp' | 'highCount'
 
@@ -27,22 +28,22 @@ export default function AreaRevenueZoneMatrix({ rows, comparisonRows, onRevenueZ
   const doSort = (key: SortKey) => { if (key === sort) setAsc(!asc); else { setSort(key); setAsc(false) } }
   const th = (key: SortKey, label: string) => <th onClick={() => doSort(key)}>{label}{sort === key ? (asc ? ' ↑' : ' ↓') : ''}</th>
   const cells = (m: ReturnType<typeof aggregate>, count: number) => <>
-    <td>{count}</td><td>{m.availableRooms.toLocaleString()}</td><td><BookingRateBar value={m.bookingRate}/></td><td>{fmtPct(m.lastOcc)}</td>
+    <td>{count}</td><td>{m.availableRooms.toLocaleString()}</td><td>{m.bookedRooms.toLocaleString()}</td><td><BookingRateBar value={m.bookingRate}/><MetricTrendLines kind="rate" change={m.bookingRateChange} sameLeadGap={m.sameLeadBookingRateGap}/></td><td>{fmtPct(m.lastOcc)}</td>
     <td className={(m.bookingRate || 0) < (m.lastOcc || 0) ? 'negative' : 'positive'}>{fmtPp(m.bookingRate != null && m.lastOcc != null ? m.bookingRate - m.lastOcc : null)}</td>
-    <td>{fmtMoney(m.adr)}</td><td>{fmtMoney(m.rp)}</td><td>{fmtMoney(m.lastRp)}</td>
+    <td>{fmtMoney(m.adr)}<MetricTrendLines kind="money" change={m.adrChange} sameLeadGap={m.sameLeadAdrGap}/></td><td>{fmtMoney(m.rp)}<MetricTrendLines kind="money" change={m.rpChange} sameLeadGap={m.sameLeadRpGap}/></td><td>{fmtMoney(m.lastRp)}</td>
     <td className={(m.rp || 0) < (m.lastRp || 0) ? 'negative' : 'positive'}>{fmtMoney(m.rp != null && m.lastRp != null ? m.rp - m.lastRp : null)}</td><td>{m.highCount}</td>
   </>
   const exportRows = () => {
     const data = areas.flatMap(area => {
-      const parent = { 层级: '片区', 片区: area.name, 收益管理商圈: '', 门店数: area.rows.length, 可售房: area.availableRooms, 预订率: area.bookingRate, 同期OCC: area.lastOcc, 在手ADR: area.adr, 理论RP: area.rp, 同期RP: area.lastRp, 高风险: area.highCount }
-      const zones = aggregateBy(area.rows, 'revenueZone', comparisonRows.filter(r => r.area === area.name)).map(zone => ({ 层级: '收益管理商圈', 片区: area.name, 收益管理商圈: zone.name, 门店数: zone.rows.length, 可售房: zone.availableRooms, 预订率: zone.bookingRate, 同期OCC: zone.lastOcc, 在手ADR: zone.adr, 理论RP: zone.rp, 同期RP: zone.lastRp, 高风险: zone.highCount }))
+      const parent = { 层级: '片区', 片区: area.name, 收益管理商圈: '', 门店数: area.rows.length, 可售房: area.availableRooms, 预订房间数: area.bookedRooms, 预订率: area.bookingRate, 预订率环比: area.bookingRateChange, 同期同提前期预订率: area.sameLeadBookingRate, 同提前期预订率差异: area.sameLeadBookingRateGap, 同期OCC: area.lastOcc, 在手ADR: area.adr, 在手ADR环比: area.adrChange, 同期同提前期在手ADR: area.sameLeadAdr, 同提前期ADR差异: area.sameLeadAdrGap, 理论RP: area.rp, 理论RP环比: area.rpChange, 同期同提前期理论RP: area.sameLeadRp, 同提前期理论RP差异: area.sameLeadRpGap, 同期RP: area.lastRp, 高风险: area.highCount }
+      const zones = aggregateBy(area.rows, 'revenueZone', comparisonRows.filter(r => r.area === area.name)).map(zone => ({ 层级: '收益管理商圈', 片区: area.name, 收益管理商圈: zone.name, 门店数: zone.rows.length, 可售房: zone.availableRooms, 预订房间数: zone.bookedRooms, 预订率: zone.bookingRate, 预订率环比: zone.bookingRateChange, 同期同提前期预订率: zone.sameLeadBookingRate, 同提前期预订率差异: zone.sameLeadBookingRateGap, 同期OCC: zone.lastOcc, 在手ADR: zone.adr, 在手ADR环比: zone.adrChange, 同期同提前期在手ADR: zone.sameLeadAdr, 同提前期ADR差异: zone.sameLeadAdrGap, 理论RP: zone.rp, 理论RP环比: zone.rpChange, 同期同提前期理论RP: zone.sameLeadRp, 同提前期理论RP差异: zone.sameLeadRpGap, 同期RP: zone.lastRp, 高风险: zone.highCount }))
       return [parent, ...zones]
     })
     const wb = utils.book_new(); utils.book_append_sheet(wb, utils.json_to_sheet(data), '片区商圈矩阵'); writeFile(wb, '片区收益管理商圈矩阵.xlsx')
   }
   return <section className="light-card province-city-matrix">
     <div className="light-card-head"><div><h2>片区 / 收益管理商圈经营矩阵</h2><p>点击片区展开收益管理商圈 · 点击商圈联动门店 · 点击表头排序</p></div><button className="table-export" onClick={exportRows}><Download/>导出矩阵</button></div>
-    <div className="province-table matrix-scroll"><table><thead><tr>{th('name','片区 / 收益管理商圈')}{th('rows','门店数')}{th('availableRooms','可售房')}{th('bookingRate','预订率')}{th('lastOcc','同期OCC')}<th>OCC缺口</th>{th('adr','在手ADR')}{th('rp','理论RP')}{th('lastRp','同期RP')}<th>RP缺口</th>{th('highCount','高风险')}</tr></thead>
+    <div className="province-table matrix-scroll"><table><thead><tr>{th('name','片区 / 收益管理商圈')}{th('rows','门店数')}{th('availableRooms','可售房')}<th>预订房间数</th>{th('bookingRate','预订率')}{th('lastOcc','同期OCC')}<th>OCC缺口</th>{th('adr','在手ADR')}{th('rp','理论RP')}{th('lastRp','同期RP')}<th>RP缺口</th>{th('highCount','高风险')}</tr></thead>
       <tbody>{areas.flatMap(area => {
         const open = expanded.has(area.name)
         const zones = aggregateBy(area.rows, 'revenueZone', comparisonRows.filter(r => r.area === area.name))
