@@ -28,6 +28,7 @@ import LightSidebar, { type DashboardView } from './components/LightSidebar'
 import ChinaWestMap from './components/ChinaWestMap'
 import ChannelPanel from './components/ChannelPanel'
 import ProvinceOverview from './components/ProvinceOverview'
+import UploadCenter from './components/UploadCenter'
 import StoreWarningTable from './components/StoreWarningTable'
 import StoreDetailDrawer from './components/StoreDetailDrawer'
 import KpiGroupCards from './components/KpiGroupCards'
@@ -73,7 +74,7 @@ export default function App() {
   const [view, setView] = useState<DashboardView>('overview')
   const [selectedStore, setSelectedStore] = useState<MetricRow | null>(null)
 
-  // 🚨 已删除 authenticated（关键改动）
+  // 🚨 已彻底删除登录状态（关键）
 
   const reload = async () => {
     try {
@@ -100,23 +101,23 @@ export default function App() {
     setData(saved)
   }
 
-  // 🚨 ADMIN 页面：彻底去登录
+  // 🚨 ADMIN 模式：直接放行（无登录）
   if (isAdminPath) {
     return (
       <div className="admin-shell">
         <header className="admin-top">
           <div>
             <b>华西区域暑期预警 · 管理后台</b>
+            <span>已关闭登录校验</span>
           </div>
+
           <nav>
             <a href="/dashboard">打开只读看板</a>
           </nav>
         </header>
 
-        {/* 🚨 直接进入后台 */}
-        <div style={{ padding: 20 }}>
-          <p>已取消登录校验，直接进入后台</p>
-        </div>
+        {/* 👉 直接渲染后台 */}
+        <AdminDashboard data={data} onData={updateData} />
       </div>
     )
   }
@@ -126,7 +127,12 @@ export default function App() {
   }
 
   if (loadError) {
-    return <div className="page-loading error">{loadError}</div>
+    return (
+      <div className="page-loading error">
+        <AlertTriangle />
+        {loadError}
+      </div>
+    )
   }
 
   const selected = data.batches.at(-1)
@@ -148,7 +154,10 @@ export default function App() {
         </header>
 
         {!selected ? (
-          <div>暂无数据</div>
+          <div className="light-empty">
+            <AlertTriangle />
+            暂无数据
+          </div>
         ) : (
           <>
             <KpiGroupCards
@@ -163,7 +172,6 @@ export default function App() {
             />
 
             <ChinaWestMap rows={[]} comparisonRows={[]} />
-
             <ChannelPanel rows={[]} previousRows={[]} comparisonLabel="--" />
           </>
         )}
